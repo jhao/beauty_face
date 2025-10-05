@@ -23,6 +23,73 @@ python -m http.server --directory public 4173
 
 > ⚠️ 需要通过 HTTPS 或 localhost 打开页面，浏览器才允许访问摄像头和 FaceDetector API。
 
+## HTTPS 启动指南
+
+若需要在纯 IP 地址环境下通过 HTTPS 访问（例如内网设备没有域名，仅能使用 `https://<ip>`），可以按照以下步骤生成证书并在本地服务器绑定：
+
+1. **生成自签名证书（包含 IP Subject Alternative Name）**
+
+   ```bash
+   # 将 <ip_address> 替换为你实际访问的 IP，例如 192.168.0.10
+   export TARGET_IP=<ip_address>
+
+   cat >openssl.cnf <<EOF
+   [req]
+   default_bits       = 2048
+   prompt             = no
+   default_md         = sha256
+   req_extensions     = req_ext
+   distinguished_name = dn
+
+   [dn]
+   C  = CN
+   ST = Local
+   L  = Dev
+   O  = BeautyFace
+   OU = Lab
+   CN = ${TARGET_IP}
+
+   [req_ext]
+   subjectAltName = IP:${TARGET_IP}
+   EOF
+
+   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+     -keyout beauty_face.key -out beauty_face.crt -config openssl.cnf
+   ```
+
+   - `beauty_face.crt`：公钥证书。
+   - `beauty_face.key`：私钥文件。
+   - 证书有效期默认为 365 天，可根据需要调整 `-days` 参数。
+
+2. **信任证书**
+
+   - macOS：双击 `beauty_face.crt` 导入「钥匙串访问」，在「系统」钥匙串中将信任设置为「始终信任」。
+   - Windows：右键证书选择“安装证书”，导入到“受信任的根证书颁发机构”。
+   - Linux：根据发行版将证书复制到系统信任目录（例如 `/usr/local/share/ca-certificates/`）并执行 `sudo update-ca-certificates`。
+
+3. **启动支持 HTTPS 的静态服务器**
+
+   使用 `http-server`：
+
+   ```bash
+   npx http-server public --ssl --cert beauty_face.crt --key beauty_face.key --host 0.0.0.0 --port 8443
+   ```
+
+   或者使用 `python` 内置模块：
+
+   ```bash
+   python -m http.server 8443 --directory public --bind 0.0.0.0 \
+     --ssl-certfile beauty_face.crt --ssl-keyfile beauty_face.key
+   ```
+
+   将服务器绑定到 `0.0.0.0` 以便通过局域网 IP 访问。
+
+4. **通过 HTTPS 访问**
+
+   在浏览器中访问 `https://<ip_address>:8443`，确认地址栏显示安全锁图标即可正常访问摄像头。
+
+> 如果需要为多个 IP 或域名签发自签名证书，可在 `subjectAltName` 中添加多个条目，例如 `subjectAltName = IP:192.168.0.10,IP:127.0.0.1,DNS:example.com`。
+
 ## 结构说明
 
 - `public/index.html`：应用入口页面。
