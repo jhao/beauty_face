@@ -183,7 +183,210 @@ class CameraController {
   }
 }
 
-  class FaceProcessor {
+class SimpleFaceDetector {
+  constructor() {
+    this.ready = false;
+    this.sampleCanvas = document.createElement('canvas');
+    this.sampleCtx = this.sampleCanvas.getContext('2d', { willReadFrequently: true });
+    this.targetSize = 160;
+    this.minimumCoverage = 0.015;
+    this.lastBounding = null;
+    this.lastLandmarks = null;
+    this.missedFrames = 0;
+    this.smoothing = 0.65;
+  }
+
+  async load() {
+    this.ready = true;
+    return this;
+  }
+
+  isSkinPixel(r, g, b) {
+    if (r < 50 || g < 40 || b < 20) return false;
+    const maxValue = Math.max(r, g, b);
+    const minValue = Math.min(r, g, b);
+    if (maxValue - minValue < 15) return false;
+    if (r <= g || r <= b) return false;
+
+    const sum = r + g + b + 1;
+    const rRatio = r / sum;
+    const gRatio = g / sum;
+    const normalizedSkin = rRatio > 0.36 && rRatio < 0.465 && gRatio > 0.28 && gRatio < 0.363;
+    const brightSkin = r > 200 && g > 210 && b > 170;
+
+    return normalizedSkin || brightSkin;
+  }
+
+  clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+  }
+
+  createLandmarks(bounding, centerX, centerY, frameWidth, frameHeight) {
+    const { left, top, width, height } = bounding;
+    const eyeOffsetX = width * 0.22;
+    const eyeOffsetY = height * 0.32;
+    const noseOffsetY = height * 0.5;
+    const mouthOffsetY = height * 0.72;
+
+    return [
+      {
+        x: this.clamp(centerX - eyeOffsetX, 0, frameWidth),
+        y: this.clamp(top + eyeOffsetY, 0, frameHeight),
+        type: 'leftEye',
+      },
+      {
+        x: this.clamp(centerX + eyeOffsetX, 0, frameWidth),
+        y: this.clamp(top + eyeOffsetY, 0, frameHeight),
+        type: 'rightEye',
+      },
+      {
+        x: this.clamp(centerX, 0, frameWidth),
+        y: this.clamp(top + noseOffsetY, 0, frameHeight),
+        type: 'nose',
+      },
+      {
+        x: this.clamp(centerX, 0, frameWidth),
+        y: this.clamp(top + mouthOffsetY, 0, frameHeight),
+        type: 'mouth',
+      },
+    ];
+  }
+
+  smoothBounding(current) {
+    if (!this.lastBounding) {
+      this.lastBounding = { ...current };
+      return current;
+    }
+
+    const blend = this.smoothing;
+    const previous = this.lastBounding;
+    const smoothed = {
+      left: previous.left * blend + current.left * (1 - blend),
+      top: previous.top * blend + current.top * (1 - blend),
+      width: previous.width * blend + current.width * (1 - blend),
+      height: previous.height * blend + current.height * (1 - blend),
+    };
+
+    this.lastBounding = { ...smoothed };
+    return smoothed;
+  }
+
+  async detect(videoElement) {
+    if (!this.ready || !videoElement?.videoWidth || !videoElement?.videoHeight) {
+      return [];
+    }
+
+    const frameWidth = videoElement.videoWidth;
+    const frameHeight = videoElement.videoHeight;
+    const maxDim = Math.max(frameWidth, frameHeight);
+    const scale = Math.min(1, this.targetSize / maxDim);
+    const sampleWidth = Math.max(32, Math.round(frameWidth * scale));
+    const sampleHeight = Math.max(32, Math.round(frameHeight * scale));
+
+    this.sampleCanvas.width = sampleWidth;
+    this.sampleCanvas.height = sampleHeight;
+    this.sampleCtx.drawImage(videoElement, 0, 0, sampleWidth, sampleHeight);
+    const { data } = this.sampleCtx.getImageData(0, 0, sampleWidth, sampleHeight);
+
+    let minX = sampleWidth;
+    let minY = sampleHeight;
+    let maxX = -1;
+    let maxY = -1;
+    let count = 0;
+    let sumX = 0;
+    let sumY = 0;
+
+    for (let y = 0; y < sampleHeight; y += 1) {
+      for (let x = 0; x < sampleWidth; x += 1) {
+        const index = (y * sampleWidth + x) * 4;
+        const r = data[index];
+        const g = data[index + 1];
+        const b = data[index + 2];
+        if (!this.isSkinPixel(r, g, b)) continue;
+
+        count += 1;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+        sumX += x;
+        sumY += y;
+      }
+    }
+
+    if (count === 0) {
+      this.missedFrames += 1;
+      if (this.missedFrames <= 4 && this.lastBounding && this.lastLandmarks) {
+        return [
+          {
+            boundingBox: { ...this.lastBounding },
+            landmarks: this.lastLandmarks.map((point) => ({ ...point })),
+          },
+        ];
+      }
+      this.lastBounding = null;
+      this.lastLandmarks = null;
+      return [];
+    }
+
+    const coverage = count / (sampleWidth * sampleHeight);
+    if (coverage < this.minimumCoverage || coverage > 0.6) {
+      this.missedFrames += 1;
+      if (this.missedFrames <= 4 && this.lastBounding && this.lastLandmarks) {
+        return [
+          {
+            boundingBox: { ...this.lastBounding },
+            landmarks: this.lastLandmarks.map((point) => ({ ...point })),
+          },
+        ];
+      }
+      this.lastBounding = null;
+      this.lastLandmarks = null;
+      return [];
+    }
+
+    this.missedFrames = 0;
+
+    const widthRatio = frameWidth / sampleWidth;
+    const heightRatio = frameHeight / sampleHeight;
+
+    const rawLeft = Math.max(0, (minX / sampleWidth) * frameWidth);
+    const rawTop = Math.max(0, (minY / sampleHeight) * frameHeight);
+    const rawWidth = Math.min(frameWidth, ((maxX - minX + 1) / sampleWidth) * frameWidth);
+    const rawHeight = Math.min(frameHeight, ((maxY - minY + 1) / sampleHeight) * frameHeight);
+
+    const paddingX = rawWidth * 0.2;
+    const paddingY = rawHeight * 0.25;
+
+    const bounding = {
+      left: this.clamp(rawLeft - paddingX, 0, frameWidth),
+      top: this.clamp(rawTop - paddingY, 0, frameHeight),
+      width: 0,
+      height: 0,
+    };
+
+    bounding.width = this.clamp(rawWidth + paddingX * 2, 0, frameWidth - bounding.left);
+    bounding.height = this.clamp(rawHeight + paddingY * 2, 0, frameHeight - bounding.top);
+
+    const centerX = (sumX / count) * widthRatio;
+    const centerY = (sumY / count) * heightRatio;
+
+    const smoothedBounding = this.smoothBounding(bounding);
+    const landmarks = this.createLandmarks(smoothedBounding, centerX, centerY, frameWidth, frameHeight);
+
+    this.lastBounding = { ...smoothedBounding };
+    this.lastLandmarks = landmarks.map((point) => ({ ...point }));
+
+    return [
+      {
+        boundingBox: { ...smoothedBounding },
+        landmarks: landmarks.map((point) => ({ ...point })),
+      },
+    ];
+  }
+}
+
+class FaceProcessor {
     constructor() {
       this.nativeDetector = null;
       this.available = false;
@@ -194,10 +397,8 @@ class CameraController {
       this.faces = [];
       this.lastDetection = 0;
       this.cooldown = 120;
-      this.faceApi = null;
-      this.faceApiOptions = null;
-      this.faceApiReady = false;
-      this.scriptLoaders = new Map();
+      this.fallbackDetector = null;
+      this.fallbackReady = false;
 
       if (this.supportsNative) {
         try {
@@ -228,121 +429,35 @@ class CameraController {
       try {
         await this.getFallbackDetector();
       } catch (error) {
-        console.warn('face-api.js 检测器预加载失败', error);
+        console.warn('离线人脸检测器预加载失败', error);
       }
-    }
-
-    async ensureScript(url, readyCheck) {
-      if (typeof readyCheck === 'function' && readyCheck()) {
-        return;
-      }
-
-      if (this.scriptLoaders.has(url)) {
-        await this.scriptLoaders.get(url);
-        return;
-      }
-
-      const loader = new Promise((resolve, reject) => {
-        const finish = () => {
-          if (typeof readyCheck === 'function' && !readyCheck()) {
-            reject(new Error(`脚本加载后仍不可用: ${url}`));
-            return;
-          }
-          resolve();
-        };
-
-        const fail = () => reject(new Error(`加载脚本失败: ${url}`));
-
-        const existingScript = Array.from(document.getElementsByTagName('script')).find(
-          (script) => script.dataset?.faceProcessorSrc === url || script.src === url
-        );
-
-        if (existingScript) {
-          if (existingScript.dataset.faceProcessorLoaded === 'true') {
-            finish();
-            return;
-          }
-          existingScript.addEventListener('load', finish, { once: true });
-          existingScript.addEventListener('error', fail, { once: true });
-          return;
-        }
-
-        const script = document.createElement('script');
-        script.src = url;
-        script.async = true;
-        script.crossOrigin = 'anonymous';
-        script.dataset.faceProcessorSrc = url;
-        script.addEventListener(
-          'load',
-          () => {
-            script.dataset.faceProcessorLoaded = 'true';
-            finish();
-          },
-          { once: true }
-        );
-        script.addEventListener('error', fail, { once: true });
-        document.head.appendChild(script);
-      })
-        .catch((error) => {
-          this.scriptLoaders.delete(url);
-          throw error;
-        })
-        .finally(() => {
-          if (this.scriptLoaders.get(url) === loader) {
-            this.scriptLoaders.delete(url);
-          }
-        });
-
-      this.scriptLoaders.set(url, loader);
-      await loader;
     }
 
     async getFallbackDetector() {
-      if (this.faceApi && this.faceApiReady) {
-        return this.faceApi;
+      if (this.fallbackDetector && this.fallbackReady) {
+        return this.fallbackDetector;
       }
       if (this.loadingFallbackPromise) {
         await this.loadingFallbackPromise;
-        return this.faceApi;
+        return this.fallbackDetector;
       }
 
       this.loadingFallback = true;
       const loadPromise = (async () => {
-        const tfUrl = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js';
-        const faceApiVersion = '1.7.23';
-        const faceApiUrl = `https://cdn.jsdelivr.net/npm/@vladmandic/face-api@${faceApiVersion}/dist/face-api.min.js`;
-        const weightsUrl = `https://cdn.jsdelivr.net/npm/@vladmandic/face-api@${faceApiVersion}/model/`; // vladmandic distribution keeps the models inside the package
-
         try {
-          await this.ensureScript(tfUrl, () => typeof window.tf !== 'undefined');
-          await this.ensureScript(faceApiUrl, () => typeof window.faceapi !== 'undefined');
-
-          const faceapi = window.faceapi;
-          if (!faceapi) {
-            throw new Error('face-api.js 未能正确初始化');
+          if (!this.fallbackDetector) {
+            this.fallbackDetector = new SimpleFaceDetector();
           }
 
-          await Promise.all([
-            faceapi.nets.tinyFaceDetector.loadFromUri(weightsUrl),
-            faceapi.nets.faceLandmark68TinyNet.loadFromUri(weightsUrl),
-          ]);
-
-          if (!this.faceApiOptions) {
-            this.faceApiOptions = new faceapi.TinyFaceDetectorOptions({
-              inputSize: 416,
-              scoreThreshold: 0.5,
-            });
-          }
-
-          this.faceApi = faceapi;
-          this.faceApiReady = true;
+          await this.fallbackDetector.load();
+          this.fallbackReady = true;
           this.available = true;
           this.usingFallback = true;
-          return this.faceApi;
+          return this.fallbackDetector;
         } catch (error) {
-          console.warn('加载 face-api.js 检测器失败', error);
-          this.faceApi = null;
-          this.faceApiReady = false;
+          console.warn('加载离线人脸检测器失败', error);
+          this.fallbackDetector = null;
+          this.fallbackReady = false;
           if (!this.nativeDetector) {
             this.available = false;
           }
@@ -358,53 +473,89 @@ class CameraController {
       })();
 
       this.loadingFallbackPromise = loadPromise;
-      const result = await loadPromise;
-      return result;
+      return loadPromise;
     }
 
-    transformFaceApiDetection(result, videoElement) {
+    normalizeDetection(result, videoElement) {
       const videoWidth = videoElement.videoWidth || 0;
       const videoHeight = videoElement.videoHeight || 0;
-      const detection = result?.detection;
-      const landmarks = result?.landmarks;
-      const box = detection?.box ?? detection?._box;
+      const clamp = (value, min, max) => Math.min(Math.max(value ?? 0, min), max);
 
-      const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-      const left = clamp(box?.x ?? 0, 0, Math.max(0, videoWidth));
-      const top = clamp(box?.y ?? 0, 0, Math.max(0, videoHeight));
-      const width = clamp(box?.width ?? 0, 0, videoWidth);
-      const height = clamp(box?.height ?? 0, 0, videoHeight);
+      const boundingSource = result?.boundingBox ?? result?.bounding ?? null;
+      const detectionBox = result?.detection?.box ?? result?.detection?._box ?? null;
 
+      const sourceBox = boundingSource ||
+        (detectionBox
+          ? {
+              left: detectionBox.x ?? detectionBox.left,
+              top: detectionBox.y ?? detectionBox.top,
+              width: detectionBox.width,
+              height: detectionBox.height,
+            }
+          : null);
+
+      if (!sourceBox) {
+        return null;
+      }
+
+      const width = clamp(sourceBox.width, 0, videoWidth);
+      const height = clamp(sourceBox.height, 0, videoHeight);
       const bounding = {
-        left: clamp(left, 0, Math.max(0, videoWidth - width)),
-        top: clamp(top, 0, Math.max(0, videoHeight - height)),
-        width: Math.min(width, videoWidth),
-        height: Math.min(height, videoHeight),
+        left: clamp(sourceBox.left ?? sourceBox.x, 0, Math.max(0, videoWidth - width)),
+        top: clamp(sourceBox.top ?? sourceBox.y, 0, Math.max(0, videoHeight - height)),
+        width,
+        height,
       };
 
       const typedLandmarks = [];
-      const pushPoints = (points, type) => {
-        if (!Array.isArray(points)) return;
-        points.forEach((point) => {
+      if (Array.isArray(result?.landmarks)) {
+        result.landmarks.forEach((point) => {
           if (!point) return;
-          const x = clamp(point.x ?? point._x ?? 0, 0, videoWidth);
-          const y = clamp(point.y ?? point._y ?? 0, 0, videoHeight);
-          typedLandmarks.push({ x, y, type });
+          typedLandmarks.push({
+            x: clamp(point.x, 0, videoWidth),
+            y: clamp(point.y, 0, videoHeight),
+            type: point.type,
+          });
         });
-      };
+      } else if (result?.landmarks) {
+        const mapLandmarks = (getter, type) => {
+          const points = typeof getter === 'function' ? getter.call(result.landmarks) : [];
+          if (!Array.isArray(points)) return;
+          points.forEach((point) => {
+            if (!point) return;
+            typedLandmarks.push({
+              x: clamp(point.x ?? point._x ?? 0, 0, videoWidth),
+              y: clamp(point.y ?? point._y ?? 0, 0, videoHeight),
+              type,
+            });
+          });
+        };
 
-      if (landmarks) {
-        pushPoints(landmarks.getLeftEye?.() ?? [], 'leftEye');
-        pushPoints(landmarks.getRightEye?.() ?? [], 'rightEye');
+        mapLandmarks(result.landmarks.getLeftEye, 'leftEye');
+        mapLandmarks(result.landmarks.getRightEye, 'rightEye');
 
-        const nose = landmarks.getNose?.() ?? [];
+        const nose = result.landmarks.getNose?.() ?? [];
         if (nose.length) {
-          pushPoints([nose[Math.floor(nose.length / 2)]], 'nose');
+          const nosePoint = nose[Math.floor(nose.length / 2)];
+          if (nosePoint) {
+            typedLandmarks.push({
+              x: clamp(nosePoint.x ?? nosePoint._x ?? 0, 0, videoWidth),
+              y: clamp(nosePoint.y ?? nosePoint._y ?? 0, 0, videoHeight),
+              type: 'nose',
+            });
+          }
         }
 
-        const mouth = landmarks.getMouth?.() ?? [];
+        const mouth = result.landmarks.getMouth?.() ?? [];
         if (mouth.length) {
-          pushPoints([mouth[Math.floor(mouth.length / 2)]], 'mouth');
+          const mouthPoint = mouth[Math.floor(mouth.length / 2)];
+          if (mouthPoint) {
+            typedLandmarks.push({
+              x: clamp(mouthPoint.x ?? mouthPoint._x ?? 0, 0, videoWidth),
+              y: clamp(mouthPoint.y ?? mouthPoint._y ?? 0, 0, videoHeight),
+              type: 'mouth',
+            });
+          }
         }
       }
 
@@ -424,7 +575,7 @@ class CameraController {
           this.lastDetection = now;
           return this.faces;
         } catch (error) {
-          console.warn('人脸检测失败，尝试启用 face-api.js 检测器', error);
+          console.warn('人脸检测失败，尝试启用离线检测器', error);
           this.faces = [];
           this.nativeDetector = null;
           this.available = false;
@@ -433,32 +584,29 @@ class CameraController {
         }
       }
 
-      const faceApi = await this.getFallbackDetector();
-      if (!faceApi) {
+      const fallbackDetector = await this.getFallbackDetector();
+      if (!fallbackDetector) {
         return this.faces;
       }
 
       try {
-        const detectorOptions = this.faceApiOptions ||
-          (faceApi
-            ? new faceApi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 })
-            : null);
-        if (detectorOptions && !this.faceApiOptions) {
-          this.faceApiOptions = detectorOptions;
-        }
+        const detections = await fallbackDetector.detect(videoElement);
+        const normalized = Array.isArray(detections)
+          ? detections
+              .map((result) => this.normalizeDetection(result, videoElement))
+              .filter(Boolean)
+          : [];
 
-        const detections = await faceApi
-          .detectAllFaces(videoElement, this.faceApiOptions ?? {})
-          .withFaceLandmarks(true);
-
-        this.faces = detections.map((result) => this.transformFaceApiDetection(result, videoElement));
+        this.faces = normalized;
         this.lastDetection = now;
         this.available = true;
         this.usingFallback = true;
       } catch (error) {
-        console.warn('face-api.js 人脸检测失败', error);
+        console.warn('离线人脸检测失败', error);
         this.faces = [];
-        this.available = false;
+        if (!this.nativeDetector) {
+          this.available = false;
+        }
       }
       return this.faces;
     }
@@ -761,7 +909,7 @@ function reflectFaceDetectorSupport(faces = []) {
 
   if (!faceProcessor.available) {
     if (fallbackLoading) {
-      faceDetectorMessage.textContent = '正在加载 face-api.js 人脸检测器，小狗脸滤镜稍后可用。';
+      faceDetectorMessage.textContent = '正在加载离线人脸检测器，小狗脸滤镜稍后可用。';
       faceDetectorMessage.dataset.state = 'pending';
       updateFaceStatusBadge('pending', '检测准备中...');
       if (dogFaceToggle && !dogFaceToggle.disabled) {
@@ -784,12 +932,12 @@ function reflectFaceDetectorSupport(faces = []) {
   }
 
   const usingFallback = typeof faceProcessor.isUsingFallback === 'function' && faceProcessor.isUsingFallback();
-  const detectorSourceText = usingFallback ? 'face-api.js 人脸检测器' : '系统内置人脸检测器';
-  const badgeSuffix = usingFallback ? '（face-api.js）' : '（系统检测器）';
+  const detectorSourceText = usingFallback ? '离线人脸检测器' : '系统内置人脸检测器';
+  const badgeSuffix = usingFallback ? '（离线检测器）' : '（系统检测器）';
 
   if (!video?.srcObject) {
     faceDetectorMessage.textContent = usingFallback
-      ? '摄像头准备中，已启用 face-api.js 人脸检测器，小狗脸滤镜将自动启用。'
+      ? '摄像头准备中，已启用离线人脸检测器，小狗脸滤镜将自动启用。'
       : '摄像头准备中，小狗脸滤镜将自动启用。';
     faceDetectorMessage.dataset.state = 'pending';
     updateFaceStatusBadge('pending', '检测中...');
@@ -800,7 +948,7 @@ function reflectFaceDetectorSupport(faces = []) {
 
   if (!dogFaceToggle?.checked) {
     faceDetectorMessage.textContent = usingFallback
-      ? '已关闭小狗脸滤镜，但 face-api.js 人脸检测器仍在后台运行。'
+      ? '已关闭小狗脸滤镜，但离线人脸检测器仍在后台运行。'
       : '已关闭小狗脸滤镜。';
     faceDetectorMessage.dataset.state = 'inactive';
     updateFaceStatusBadge(hasFaces ? 'ready' : 'warning', hasFaces ? `已检测到人脸 ${badgeSuffix}` : `未检测到人脸 ${badgeSuffix}`);
