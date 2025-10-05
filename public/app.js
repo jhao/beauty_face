@@ -22,6 +22,7 @@ const downloadStatus = document.querySelector('.download-status');
 const progressText = downloadStatus?.querySelector('.progress-text');
 const progressBar = downloadStatus?.querySelector('.progress');
 const faceDetectorMessage = document.getElementById('faceDetectorMessage');
+const faceStatusBadge = document.getElementById('faceStatusBadge');
 
 class CameraController {
   constructor(videoElement) {
@@ -462,6 +463,56 @@ const beautyController = new BeautyController();
 const modelManager = new ModelManager();
 
 let animationFrameId = null;
+let cameraStartTimeout = null;
+let awaitingUserInteraction = false;
+const userActivationEvents = ['click', 'touchstart'];
+
+function updateFaceStatusBadge(state, text) {
+  if (!faceStatusBadge) return;
+  if (typeof text === 'string') {
+    faceStatusBadge.textContent = text;
+  }
+  if (state) {
+    faceStatusBadge.dataset.state = state;
+  }
+}
+
+function disableUserInteractionPrompt() {
+  if (!awaitingUserInteraction) return;
+  awaitingUserInteraction = false;
+  userActivationEvents.forEach((eventName) => {
+    const options = eventName === 'touchstart' ? { passive: true } : undefined;
+    document.removeEventListener(eventName, handleUserActivation, options);
+  });
+}
+
+function handleUserActivation() {
+  if (!awaitingUserInteraction) return;
+  showStatus('正在尝试启动摄像头...');
+  if (!cameraStartTimeout) {
+    cameraStartTimeout = setTimeout(() => {
+      statusMessage.textContent = '摄像头启动耗时较长，请确认浏览器已授权访问。';
+    }, 6000);
+  }
+  video
+    .play()
+    .then(() => {
+      disableUserInteractionPrompt();
+      updateFaceStatusBadge('pending', '检测中...');
+    })
+    .catch((error) => {
+      console.warn('用户触发的摄像头播放失败', error);
+    });
+}
+
+function enableUserInteractionPrompt() {
+  if (awaitingUserInteraction) return;
+  awaitingUserInteraction = true;
+  userActivationEvents.forEach((eventName) => {
+    const options = eventName === 'touchstart' ? { passive: true } : undefined;
+    document.addEventListener(eventName, handleUserActivation, options);
+  });
+}
 
 function resizeCanvas() {
   if (!video.videoWidth || !video.videoHeight) return;
@@ -484,7 +535,7 @@ async function renderFrame() {
   ctx.drawImage(sourceCanvas, 0, 0, canvas.width, canvas.height);
 
   const faces = await faceProcessor.detect(video);
-  reflectFaceDetectorSupport();
+  reflectFaceDetectorSupport(faces);
   beautyController.applyGlobalFilters(canvas);
 
   beautyController.applySlimFace(ctx, canvas.width, canvas.height);
@@ -506,6 +557,16 @@ function showStatus(message) {
 
 function hideStatus() {
   statusOverlay.hidden = true;
+  disableUserInteractionPrompt();
+  if (cameraStartTimeout) {
+    clearTimeout(cameraStartTimeout);
+    cameraStartTimeout = null;
+  }
+}
+
+function handleVideoReady() {
+  hideStatus();
+  updateFaceStatusBadge('pending', '检测中...');
 }
 
 function updateOfflineBanner() {
@@ -516,26 +577,91 @@ function updateOfflineBanner() {
   }
 }
 
-function reflectFaceDetectorSupport() {
+function reflectFaceDetectorSupport(faces = []) {
   if (!faceDetectorMessage) return;
-  if (faceProcessor.available) {
-    faceDetectorMessage.textContent = '已启用设备端人脸识别，滤镜可智能贴合。';
-    faceDetectorMessage.dataset.state = 'supported';
-  } else {
+
+  if (!faceProcessor.available) {
     faceDetectorMessage.textContent = '浏览器暂不支持 FaceDetector API，滤镜将以全局效果呈现。';
     faceDetectorMessage.dataset.state = 'unsupported';
+    if (dogFaceToggle) {
+      dogFaceToggle.checked = false;
+      dogFaceToggle.disabled = true;
+    }
+    updateFaceStatusBadge('error', '检测不可用');
+    return;
+  }
+
+  if (dogFaceToggle?.disabled) {
+    dogFaceToggle.disabled = false;
+  }
+
+  if (!video?.srcObject) {
+    faceDetectorMessage.textContent = '摄像头准备中，小狗脸滤镜将自动启用。';
+    faceDetectorMessage.dataset.state = 'pending';
+    updateFaceStatusBadge('pending', '检测中...');
+    return;
+  }
+
+  const hasFaces = Array.isArray(faces) && faces.length > 0;
+
+  if (!dogFaceToggle?.checked) {
+    faceDetectorMessage.textContent = '已关闭小狗脸滤镜。';
+    faceDetectorMessage.dataset.state = 'inactive';
+    updateFaceStatusBadge(hasFaces ? 'ready' : 'warning', hasFaces ? '已检测到人脸' : '未检测到人脸');
+    return;
+  }
+
+  if (hasFaces) {
+    const faceCountText = faces.length === 1 ? '1 张人脸' : `${faces.length} 张人脸`;
+    faceDetectorMessage.textContent = `已为检测到的 ${faceCountText} 应用小狗脸滤镜。`;
+    faceDetectorMessage.dataset.state = 'active';
+    updateFaceStatusBadge('ready', '已检测到人脸');
+  } else {
+    faceDetectorMessage.textContent = '未检测到人脸，小狗脸滤镜暂不会显示。';
+    faceDetectorMessage.dataset.state = 'warning';
+    updateFaceStatusBadge('warning', '未检测到人脸');
   }
 }
 
 async function startApp() {
   try {
     showStatus('正在启动摄像头...');
+    if (cameraStartTimeout) {
+      clearTimeout(cameraStartTimeout);
+      cameraStartTimeout = null;
+    }
+    cameraStartTimeout = setTimeout(() => {
+      statusMessage.textContent = '摄像头启动耗时较长，请确认浏览器已授权访问。';
+    }, 6000);
+
     await cameraController.init();
-    hideStatus();
+    updateFaceStatusBadge('pending', '检测中...');
+
+    try {
+      await video.play();
+    } catch (error) {
+      console.warn('视频自动播放失败', error);
+      showStatus('需要您的操作以启动摄像头，请点击页面允许播放。');
+      if (cameraStartTimeout) {
+        clearTimeout(cameraStartTimeout);
+        cameraStartTimeout = null;
+      }
+      enableUserInteractionPrompt();
+    }
+
     renderFrame();
   } catch (error) {
     console.error(error);
     showStatus(error.message || '摄像头初始化失败');
+    if (cameraStartTimeout) {
+      clearTimeout(cameraStartTimeout);
+      cameraStartTimeout = null;
+    }
+    if (faceDetectorMessage) {
+      faceDetectorMessage.textContent = '摄像头未能启动，小狗脸滤镜不可用。';
+      faceDetectorMessage.dataset.state = 'warning';
+    }
+    updateFaceStatusBadge('error', '检测不可用');
   }
 }
 
@@ -556,6 +682,10 @@ function setupControls() {
   toggleFlashButton.addEventListener('click', async () => {
     const enabled = await cameraController.toggleFlash();
     toggleFlashButton.classList.toggle('active', enabled);
+  });
+
+  dogFaceToggle.addEventListener('change', () => {
+    reflectFaceDetectorSupport(faceProcessor.faces);
   });
 
   const updateSetting = (key) => (event) => {
@@ -603,6 +733,9 @@ function setupOfflineHandlers() {
   window.addEventListener('offline', updateOfflineBanner);
   updateOfflineBanner();
 }
+
+video.addEventListener('loadeddata', handleVideoReady, { once: true });
+video.addEventListener('playing', handleVideoReady, { once: true });
 
 registerServiceWorker();
 setupOfflineHandlers();
