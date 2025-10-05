@@ -183,109 +183,285 @@ class CameraController {
   }
 }
 
-class FaceProcessor {
-  constructor() {
-    this.detector = null;
-    this.available = 'FaceDetector' in window;
-    this.faces = [];
-    this.lastDetection = 0;
-    this.cooldown = 120;
-    if (this.available) {
-      try {
-        this.detector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 5 });
-      } catch (error) {
-        console.warn('初始化 FaceDetector 失败', error);
-        this.available = false;
+  class FaceProcessor {
+    constructor() {
+      this.nativeDetector = null;
+      this.available = false;
+      this.supportsNative = 'FaceDetector' in window;
+      this.loadingFallback = false;
+      this.loadingFallbackPromise = null;
+      this.usingFallback = false;
+      this.faces = [];
+      this.lastDetection = 0;
+      this.cooldown = 120;
+      this.faceApi = null;
+      this.faceApiOptions = null;
+      this.faceApiReady = false;
+      this.scriptLoaders = new Map();
+
+      if (this.supportsNative) {
+        try {
+          this.nativeDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 5 });
+          this.available = true;
+        } catch (error) {
+          console.warn('初始化 FaceDetector 失败', error);
+          this.nativeDetector = null;
+          this.supportsNative = false;
+        }
       }
     }
-  }
 
-  async detect(videoElement) {
-    if (!this.available || !videoElement?.videoWidth) return this.faces;
-    const now = performance.now();
-    if (now - this.lastDetection < this.cooldown) {
+    hasNativeSupport() {
+      return !!this.nativeDetector;
+    }
+
+    isFallbackLoading() {
+      return this.loadingFallback;
+    }
+
+    isUsingFallback() {
+      return this.usingFallback;
+    }
+
+    async prepareFallback() {
+      if (this.supportsNative) return;
+      try {
+        await this.getFallbackDetector();
+      } catch (error) {
+        console.warn('face-api.js 检测器预加载失败', error);
+      }
+    }
+
+    async ensureScript(url, readyCheck) {
+      if (typeof readyCheck === 'function' && readyCheck()) {
+        return;
+      }
+
+      if (this.scriptLoaders.has(url)) {
+        await this.scriptLoaders.get(url);
+        return;
+      }
+
+      const loader = new Promise((resolve, reject) => {
+        const finish = () => {
+          if (typeof readyCheck === 'function' && !readyCheck()) {
+            reject(new Error(`脚本加载后仍不可用: ${url}`));
+            return;
+          }
+          resolve();
+        };
+
+        const fail = () => reject(new Error(`加载脚本失败: ${url}`));
+
+        const existingScript = Array.from(document.getElementsByTagName('script')).find(
+          (script) => script.dataset?.faceProcessorSrc === url || script.src === url
+        );
+
+        if (existingScript) {
+          if (existingScript.dataset.faceProcessorLoaded === 'true') {
+            finish();
+            return;
+          }
+          existingScript.addEventListener('load', finish, { once: true });
+          existingScript.addEventListener('error', fail, { once: true });
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = url;
+        script.async = true;
+        script.crossOrigin = 'anonymous';
+        script.dataset.faceProcessorSrc = url;
+        script.addEventListener(
+          'load',
+          () => {
+            script.dataset.faceProcessorLoaded = 'true';
+            finish();
+          },
+          { once: true }
+        );
+        script.addEventListener('error', fail, { once: true });
+        document.head.appendChild(script);
+      })
+        .catch((error) => {
+          this.scriptLoaders.delete(url);
+          throw error;
+        })
+        .finally(() => {
+          if (this.scriptLoaders.get(url) === loader) {
+            this.scriptLoaders.delete(url);
+          }
+        });
+
+      this.scriptLoaders.set(url, loader);
+      await loader;
+    }
+
+    async getFallbackDetector() {
+      if (this.faceApi && this.faceApiReady) {
+        return this.faceApi;
+      }
+      if (this.loadingFallbackPromise) {
+        await this.loadingFallbackPromise;
+        return this.faceApi;
+      }
+
+      this.loadingFallback = true;
+      const loadPromise = (async () => {
+        const tfUrl = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js';
+        const faceApiUrl = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+        const weightsUrl = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+
+        try {
+          await this.ensureScript(tfUrl, () => typeof window.tf !== 'undefined');
+          await this.ensureScript(faceApiUrl, () => typeof window.faceapi !== 'undefined');
+
+          const faceapi = window.faceapi;
+          if (!faceapi) {
+            throw new Error('face-api.js 未能正确初始化');
+          }
+
+          await Promise.all([
+            faceapi.nets.tinyFaceDetector.loadFromUri(weightsUrl),
+            faceapi.nets.faceLandmark68TinyNet.loadFromUri(weightsUrl),
+          ]);
+
+          if (!this.faceApiOptions) {
+            this.faceApiOptions = new faceapi.TinyFaceDetectorOptions({
+              inputSize: 416,
+              scoreThreshold: 0.5,
+            });
+          }
+
+          this.faceApi = faceapi;
+          this.faceApiReady = true;
+          this.available = true;
+          this.usingFallback = true;
+          return this.faceApi;
+        } catch (error) {
+          console.warn('加载 face-api.js 检测器失败', error);
+          this.faceApi = null;
+          this.faceApiReady = false;
+          if (!this.nativeDetector) {
+            this.available = false;
+          }
+          this.usingFallback = false;
+          return null;
+        } finally {
+          this.loadingFallback = false;
+          this.loadingFallbackPromise = null;
+          if (typeof reflectFaceDetectorSupport === 'function') {
+            requestAnimationFrame(() => reflectFaceDetectorSupport(this.faces));
+          }
+        }
+      })();
+
+      this.loadingFallbackPromise = loadPromise;
+      const result = await loadPromise;
+      return result;
+    }
+
+    transformFaceApiDetection(result, videoElement) {
+      const videoWidth = videoElement.videoWidth || 0;
+      const videoHeight = videoElement.videoHeight || 0;
+      const detection = result?.detection;
+      const landmarks = result?.landmarks;
+      const box = detection?.box ?? detection?._box;
+
+      const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+      const left = clamp(box?.x ?? 0, 0, Math.max(0, videoWidth));
+      const top = clamp(box?.y ?? 0, 0, Math.max(0, videoHeight));
+      const width = clamp(box?.width ?? 0, 0, videoWidth);
+      const height = clamp(box?.height ?? 0, 0, videoHeight);
+
+      const bounding = {
+        left: clamp(left, 0, Math.max(0, videoWidth - width)),
+        top: clamp(top, 0, Math.max(0, videoHeight - height)),
+        width: Math.min(width, videoWidth),
+        height: Math.min(height, videoHeight),
+      };
+
+      const typedLandmarks = [];
+      const pushPoints = (points, type) => {
+        if (!Array.isArray(points)) return;
+        points.forEach((point) => {
+          if (!point) return;
+          const x = clamp(point.x ?? point._x ?? 0, 0, videoWidth);
+          const y = clamp(point.y ?? point._y ?? 0, 0, videoHeight);
+          typedLandmarks.push({ x, y, type });
+        });
+      };
+
+      if (landmarks) {
+        pushPoints(landmarks.getLeftEye?.() ?? [], 'leftEye');
+        pushPoints(landmarks.getRightEye?.() ?? [], 'rightEye');
+
+        const nose = landmarks.getNose?.() ?? [];
+        if (nose.length) {
+          pushPoints([nose[Math.floor(nose.length / 2)]], 'nose');
+        }
+
+        const mouth = landmarks.getMouth?.() ?? [];
+        if (mouth.length) {
+          pushPoints([mouth[Math.floor(mouth.length / 2)]], 'mouth');
+        }
+      }
+
+      return { boundingBox: bounding, landmarks: typedLandmarks };
+    }
+
+    async detect(videoElement) {
+      if (!videoElement?.videoWidth) return this.faces;
+      const now = performance.now();
+      if (now - this.lastDetection < this.cooldown) {
+        return this.faces;
+      }
+
+      if (this.nativeDetector) {
+        try {
+          this.faces = await this.nativeDetector.detect(videoElement);
+          this.lastDetection = now;
+          return this.faces;
+        } catch (error) {
+          console.warn('人脸检测失败，尝试启用 face-api.js 检测器', error);
+          this.faces = [];
+          this.nativeDetector = null;
+          this.available = false;
+          this.supportsNative = false;
+          this.prepareFallback();
+        }
+      }
+
+      const faceApi = await this.getFallbackDetector();
+      if (!faceApi) {
+        return this.faces;
+      }
+
+      try {
+        const detectorOptions = this.faceApiOptions ||
+          (faceApi
+            ? new faceApi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 })
+            : null);
+        if (detectorOptions && !this.faceApiOptions) {
+          this.faceApiOptions = detectorOptions;
+        }
+
+        const detections = await faceApi
+          .detectAllFaces(videoElement, this.faceApiOptions ?? {})
+          .withFaceLandmarks(true);
+
+        this.faces = detections.map((result) => this.transformFaceApiDetection(result, videoElement));
+        this.lastDetection = now;
+        this.available = true;
+        this.usingFallback = true;
+      } catch (error) {
+        console.warn('face-api.js 人脸检测失败', error);
+        this.faces = [];
+        this.available = false;
+      }
       return this.faces;
     }
-
-    try {
-      this.faces = await this.detector.detect(videoElement);
-      this.lastDetection = now;
-    } catch (error) {
-      console.warn('人脸检测失败', error);
-      this.faces = [];
-      this.available = false;
-    }
-    return this.faces;
   }
-
-  drawDogFace(ctx, face) {
-    if (!face?.boundingBox) return;
-    const { width, height, top, left } = face.boundingBox;
-    const centerX = left + width / 2;
-    const centerY = top + height / 2;
-
-    ctx.save();
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-
-    // Draw ears
-    const earHeight = height * 0.6;
-    const earWidth = width * 0.45;
-    const earYOffset = height * 0.1;
-
-    ctx.fillStyle = 'rgba(139, 79, 44, 0.9)';
-    ctx.beginPath();
-    ctx.moveTo(centerX - earWidth, top - earYOffset);
-    ctx.quadraticCurveTo(centerX - earWidth * 0.2, top - earHeight, centerX - width * 0.1, top - earYOffset * 0.5);
-    ctx.quadraticCurveTo(centerX - earWidth * 0.4, top - earHeight * 0.2, centerX - earWidth, top - earYOffset);
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.moveTo(centerX + earWidth, top - earYOffset);
-    ctx.quadraticCurveTo(centerX + earWidth * 0.2, top - earHeight, centerX + width * 0.1, top - earYOffset * 0.5);
-    ctx.quadraticCurveTo(centerX + earWidth * 0.4, top - earHeight * 0.2, centerX + earWidth, top - earYOffset);
-    ctx.fill();
-
-    // Inner ears
-    ctx.fillStyle = 'rgba(255, 179, 189, 0.8)';
-    ctx.beginPath();
-    ctx.ellipse(centerX - earWidth * 0.45, top - earYOffset * 0.7, earWidth * 0.25, earHeight * 0.35, Math.PI / 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(centerX + earWidth * 0.45, top - earYOffset * 0.7, earWidth * 0.25, earHeight * 0.35, -Math.PI / 6, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Draw muzzle
-    const muzzleWidth = width * 0.65;
-    const muzzleHeight = height * 0.45;
-    const muzzleTop = centerY + height * 0.05;
-
-    const gradient = ctx.createRadialGradient(centerX, muzzleTop + muzzleHeight * 0.4, muzzleHeight * 0.1, centerX, muzzleTop + muzzleHeight * 0.4, muzzleHeight);
-    gradient.addColorStop(0, 'rgba(255, 248, 240, 0.95)');
-    gradient.addColorStop(1, 'rgba(230, 210, 185, 0.9)');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.ellipse(centerX, muzzleTop, muzzleWidth / 2, muzzleHeight / 2, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Nose
-    ctx.fillStyle = 'rgba(74, 49, 38, 0.95)';
-    ctx.beginPath();
-    ctx.moveTo(centerX, muzzleTop - muzzleHeight * 0.1);
-    ctx.quadraticCurveTo(centerX - muzzleWidth * 0.18, muzzleTop + muzzleHeight * 0.15, centerX, muzzleTop + muzzleHeight * 0.18);
-    ctx.quadraticCurveTo(centerX + muzzleWidth * 0.18, muzzleTop + muzzleHeight * 0.15, centerX, muzzleTop - muzzleHeight * 0.1);
-    ctx.fill();
-
-    // Nose shine
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
-    ctx.beginPath();
-    ctx.ellipse(centerX - muzzleWidth * 0.08, muzzleTop + muzzleHeight * 0.01, muzzleWidth * 0.08, muzzleHeight * 0.05, -Math.PI / 8, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.restore();
-  }
-}
-
 class BeautyController {
   constructor() {
     this.settings = {
@@ -580,14 +756,25 @@ function updateOfflineBanner() {
 function reflectFaceDetectorSupport(faces = []) {
   if (!faceDetectorMessage) return;
 
+  const fallbackLoading = typeof faceProcessor.isFallbackLoading === 'function' && faceProcessor.isFallbackLoading();
+
   if (!faceProcessor.available) {
-    faceDetectorMessage.textContent = '浏览器暂不支持 FaceDetector API，滤镜将以全局效果呈现。';
-    faceDetectorMessage.dataset.state = 'unsupported';
-    if (dogFaceToggle) {
-      dogFaceToggle.checked = false;
-      dogFaceToggle.disabled = true;
+    if (fallbackLoading) {
+      faceDetectorMessage.textContent = '正在加载 face-api.js 人脸检测器，小狗脸滤镜稍后可用。';
+      faceDetectorMessage.dataset.state = 'pending';
+      updateFaceStatusBadge('pending', '检测准备中...');
+      if (dogFaceToggle && !dogFaceToggle.disabled) {
+        dogFaceToggle.disabled = true;
+      }
+    } else {
+      faceDetectorMessage.textContent = '浏览器暂不支持人脸检测，滤镜将以全局效果呈现。';
+      faceDetectorMessage.dataset.state = 'unsupported';
+      if (dogFaceToggle) {
+        dogFaceToggle.checked = false;
+        dogFaceToggle.disabled = true;
+      }
+      updateFaceStatusBadge('error', '检测不可用');
     }
-    updateFaceStatusBadge('error', '检测不可用');
     return;
   }
 
@@ -595,8 +782,14 @@ function reflectFaceDetectorSupport(faces = []) {
     dogFaceToggle.disabled = false;
   }
 
+  const usingFallback = typeof faceProcessor.isUsingFallback === 'function' && faceProcessor.isUsingFallback();
+  const detectorSourceText = usingFallback ? 'face-api.js 人脸检测器' : '系统内置人脸检测器';
+  const badgeSuffix = usingFallback ? '（face-api.js）' : '（系统检测器）';
+
   if (!video?.srcObject) {
-    faceDetectorMessage.textContent = '摄像头准备中，小狗脸滤镜将自动启用。';
+    faceDetectorMessage.textContent = usingFallback
+      ? '摄像头准备中，已启用 face-api.js 人脸检测器，小狗脸滤镜将自动启用。'
+      : '摄像头准备中，小狗脸滤镜将自动启用。';
     faceDetectorMessage.dataset.state = 'pending';
     updateFaceStatusBadge('pending', '检测中...');
     return;
@@ -605,21 +798,23 @@ function reflectFaceDetectorSupport(faces = []) {
   const hasFaces = Array.isArray(faces) && faces.length > 0;
 
   if (!dogFaceToggle?.checked) {
-    faceDetectorMessage.textContent = '已关闭小狗脸滤镜。';
+    faceDetectorMessage.textContent = usingFallback
+      ? '已关闭小狗脸滤镜，但 face-api.js 人脸检测器仍在后台运行。'
+      : '已关闭小狗脸滤镜。';
     faceDetectorMessage.dataset.state = 'inactive';
-    updateFaceStatusBadge(hasFaces ? 'ready' : 'warning', hasFaces ? '已检测到人脸' : '未检测到人脸');
+    updateFaceStatusBadge(hasFaces ? 'ready' : 'warning', hasFaces ? `已检测到人脸 ${badgeSuffix}` : `未检测到人脸 ${badgeSuffix}`);
     return;
   }
 
   if (hasFaces) {
     const faceCountText = faces.length === 1 ? '1 张人脸' : `${faces.length} 张人脸`;
-    faceDetectorMessage.textContent = `已为检测到的 ${faceCountText} 应用小狗脸滤镜。`;
+    faceDetectorMessage.textContent = `已通过${detectorSourceText}识别到 ${faceCountText} 并应用小狗脸滤镜。`;
     faceDetectorMessage.dataset.state = 'active';
-    updateFaceStatusBadge('ready', '已检测到人脸');
+    updateFaceStatusBadge('ready', `已检测到人脸 ${badgeSuffix}`);
   } else {
-    faceDetectorMessage.textContent = '未检测到人脸，小狗脸滤镜暂不会显示。';
+    faceDetectorMessage.textContent = `使用${detectorSourceText}未检测到人脸，小狗脸滤镜暂不会显示。`;
     faceDetectorMessage.dataset.state = 'warning';
-    updateFaceStatusBadge('warning', '未检测到人脸');
+    updateFaceStatusBadge('warning', `未检测到人脸 ${badgeSuffix}`);
   }
 }
 
@@ -634,8 +829,15 @@ async function startApp() {
       statusMessage.textContent = '摄像头启动耗时较长，请确认浏览器已授权访问。';
     }, 6000);
 
+    if (typeof faceProcessor.hasNativeSupport === 'function' && !faceProcessor.hasNativeSupport()) {
+      faceProcessor.prepareFallback();
+      reflectFaceDetectorSupport(faceProcessor.faces);
+    }
+
     await cameraController.init();
+    hideStatus();
     updateFaceStatusBadge('pending', '检测中...');
+    reflectFaceDetectorSupport(faceProcessor.faces);
 
     try {
       await video.play();
@@ -647,6 +849,7 @@ async function startApp() {
         cameraStartTimeout = null;
       }
       enableUserInteractionPrompt();
+      reflectFaceDetectorSupport(faceProcessor.faces);
     }
 
     renderFrame();
