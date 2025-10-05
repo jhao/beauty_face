@@ -40,8 +40,13 @@ self.addEventListener('fetch', (event) => {
           if (!networkResponse || networkResponse.status !== 200) {
             return networkResponse;
           }
-          const copy = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+
+          const protocol = new URL(request.url).protocol;
+          if (protocol === 'http:' || protocol === 'https:') {
+            const copy = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+
           return networkResponse;
         })
         .catch(() => {
