@@ -478,7 +478,7 @@ class HumanFaceDetector {
             this.human = new ctorCandidate({
               backend: 'webgl',
               cacheSensitivity: 0,
-              modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models',
+              modelBasePath: './models',
               face: {
                 enabled: true,
                 detector: { rotation: true },
