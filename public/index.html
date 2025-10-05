@@ -39,6 +39,7 @@
           </div>
         </div>
         <div class="control-group">
+          <p id="activeDetectorLabel" class="helper-text detector-label">当前人脸检测：未加载成功任何人脸识别模型</p>
           <h2>趣味换脸</h2>
           <label class="switch">
             <input type="checkbox" id="dogFaceToggle" checked />
@@ -71,9 +72,16 @@
         <div class="control-group offline-status">
           <h2>离线状态</h2>
           <p id="offlineMessage">准备就绪，可离线使用。</p>
+          <div class="console-panel">
+            <h3>系统日志</h3>
+            <div id="consoleOutput" class="console-output" role="log" aria-live="polite"></div>
+          </div>
         </div>
       </section>
     </main>
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
+    <script src="https://unpkg.dev/@vladmandic/human/dist/human.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/human/3.0.0/human.js"></script>
     <script src="app.js" type="module"></script>
   </body>
 </html>

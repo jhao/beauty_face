@@ -23,6 +23,69 @@ const progressText = downloadStatus?.querySelector('.progress-text');
 const progressBar = downloadStatus?.querySelector('.progress');
 const faceDetectorMessage = document.getElementById('faceDetectorMessage');
 const faceStatusBadge = document.getElementById('faceStatusBadge');
+const activeDetectorLabel = document.getElementById('activeDetectorLabel');
+const consoleOutput = document.getElementById('consoleOutput');
+
+function setDetectorLabel(text = '未加载成功任何人脸识别模型', type = 'none') {
+  if (!activeDetectorLabel) return;
+  activeDetectorLabel.textContent = `当前人脸检测：${text}`;
+  activeDetectorLabel.dataset.detectorType = type || 'none';
+}
+
+const consoleBuffer = [];
+const maxConsoleEntries = 200;
+
+function formatConsoleArgs(args) {
+  return args
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      if (item instanceof Error) {
+        return `${item.name}: ${item.message}`;
+      }
+      try {
+        return JSON.stringify(item);
+      } catch (error) {
+        return String(item);
+      }
+    })
+    .join(' ');
+}
+
+function appendConsoleEntry(level, args) {
+  if (!consoleOutput) return;
+  const message = formatConsoleArgs(args);
+  const timestamp = new Date().toLocaleTimeString();
+  consoleBuffer.push({ level, message, timestamp });
+  while (consoleBuffer.length > maxConsoleEntries) {
+    consoleBuffer.shift();
+  }
+
+  const fragment = document.createDocumentFragment();
+  consoleBuffer.forEach(({ level: entryLevel, message: entryMessage, timestamp: entryTimestamp }) => {
+    const row = document.createElement('div');
+    row.className = `log-entry log-entry--${entryLevel}`;
+    row.textContent = `[${entryTimestamp}] ${entryMessage}`;
+    fragment.appendChild(row);
+  });
+
+  consoleOutput.textContent = '';
+  consoleOutput.appendChild(fragment);
+  consoleOutput.scrollTop = consoleOutput.scrollHeight;
+}
+
+['log', 'info', 'warn', 'error'].forEach((method) => {
+  const original = console[method];
+  console[method] = (...args) => {
+    try {
+      appendConsoleEntry(method, args);
+    } catch (error) {
+      original.call(console, '日志面板渲染失败', error);
+    }
+    original.apply(console, args);
+  };
+});
+
+setDetectorLabel();
 
 class CameraController {
   constructor(videoElement) {
@@ -386,231 +449,515 @@ class SimpleFaceDetector {
   }
 }
 
-class FaceProcessor {
-    constructor() {
-      this.nativeDetector = null;
-      this.available = false;
-      this.supportsNative = 'FaceDetector' in window;
-      this.loadingFallback = false;
-      this.loadingFallbackPromise = null;
-      this.usingFallback = false;
-      this.faces = [];
-      this.lastDetection = 0;
-      this.cooldown = 120;
-      this.fallbackDetector = null;
-      this.fallbackReady = false;
+class HumanFaceDetector {
+  constructor() {
+    this.ready = false;
+    this.human = null;
+    this.loadingPromise = null;
+  }
 
-      if (this.supportsNative) {
-        try {
-          this.nativeDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 5 });
-          this.available = true;
-        } catch (error) {
-          console.warn('初始化 FaceDetector 失败', error);
-          this.nativeDetector = null;
-          this.supportsNative = false;
-        }
-      }
+  async load() {
+    if (this.ready && this.human) return this;
+    if (this.loadingPromise) {
+      await this.loadingPromise;
+      return this;
     }
 
-    hasNativeSupport() {
-      return !!this.nativeDetector;
-    }
-
-    isFallbackLoading() {
-      return this.loadingFallback;
-    }
-
-    isUsingFallback() {
-      return this.usingFallback;
-    }
-
-    async prepareFallback() {
-      if (this.supportsNative) return;
+    this.loadingPromise = (async () => {
       try {
-        await this.getFallbackDetector();
+        const globalNamespace = window.Human ?? window.human ?? null;
+        const ctorCandidate =
+          typeof globalNamespace === 'function'
+            ? globalNamespace
+            : typeof globalNamespace?.Human === 'function'
+              ? globalNamespace.Human
+              : null;
+
+        if (!this.human) {
+          if (ctorCandidate) {
+            this.human = new ctorCandidate({
+              backend: 'webgl',
+              cacheSensitivity: 0,
+              modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human/models',
+              face: {
+                enabled: true,
+                detector: { rotation: true },
+                mesh: { enabled: true },
+                iris: { enabled: true },
+                attention: { enabled: true },
+              },
+            });
+          } else if (globalNamespace && typeof globalNamespace.detect === 'function') {
+            this.human = globalNamespace;
+          }
+        }
+
+        if (!this.human || typeof this.human.detect !== 'function') {
+          throw new Error('Human 全局对象不可用');
+        }
+
+        if (typeof this.human.load === 'function') {
+          await this.human.load();
+        }
+        if (typeof this.human.warmup === 'function') {
+          await this.human.warmup();
+        }
+        this.ready = true;
+        console.info('Human 人脸检测器已就绪');
       } catch (error) {
-        console.warn('离线人脸检测器预加载失败', error);
+        console.error('Human 人脸检测器加载失败', error);
+        this.human = null;
+        this.ready = false;
+        throw error;
+      } finally {
+        this.loadingPromise = null;
       }
+    })();
+
+    await this.loadingPromise;
+    return this;
+  }
+
+  clamp(value, min, max) {
+    return Math.min(Math.max(value ?? 0, min), max);
+  }
+
+  averagePoint(points, frameWidth, frameHeight) {
+    if (!Array.isArray(points) || points.length === 0) return null;
+    const sum = points.reduce(
+      (acc, point) => {
+        const x = Array.isArray(point) ? point[0] : point?.x ?? point?._x ?? 0;
+        const y = Array.isArray(point) ? point[1] : point?.y ?? point?._y ?? 0;
+        return { x: acc.x + x, y: acc.y + y };
+      },
+      { x: 0, y: 0 },
+    );
+    const center = {
+      x: this.clamp(sum.x / points.length, 0, frameWidth),
+      y: this.clamp(sum.y / points.length, 0, frameHeight),
+    };
+    return center;
+  }
+
+  buildLandmarks(face, frameWidth, frameHeight) {
+    const typedLandmarks = [];
+    const annotations = face?.annotations ?? {};
+
+    const leftEye =
+      annotations.leftEyeUpper0 || annotations.leftEyeUpper1 || annotations.leftEyeLower0 || annotations.leftEyeLower1;
+    const rightEye =
+      annotations.rightEyeUpper0 || annotations.rightEyeUpper1 || annotations.rightEyeLower0 || annotations.rightEyeLower1;
+    const nose = annotations.noseTip || annotations.noseBottom || annotations.midwayBetweenEyes;
+    const mouth = annotations.lipsUpperOuter || annotations.lipsLowerOuter || annotations.mouthUpper || annotations.mouthLower;
+
+    const addPoint = (points, type) => {
+      const point = this.averagePoint(points, frameWidth, frameHeight);
+      if (!point) return;
+      typedLandmarks.push({ ...point, type });
+    };
+
+    addPoint(leftEye, 'leftEye');
+    addPoint(rightEye, 'rightEye');
+    addPoint(nose, 'nose');
+    addPoint(mouth, 'mouth');
+
+    return typedLandmarks;
+  }
+
+  extractBoundingBox(face, frameWidth, frameHeight) {
+    const clamp = (value, min, max) => Math.min(Math.max(value ?? 0, min), max);
+    const source =
+      face?.box ||
+      face?.bbox ||
+      face?.boxRaw ||
+      (Array.isArray(face?.boxScore) ? { x: face.boxScore[0], y: face.boxScore[1], width: face.boxScore[2], height: face.boxScore[3] } : null) ||
+      {};
+
+    const left = clamp(source.left ?? source.x ?? source[0], 0, frameWidth);
+    const top = clamp(source.top ?? source.y ?? source[1], 0, frameHeight);
+    const widthCandidate = source.width ?? (source.right != null ? source.right - (source.left ?? source.x ?? 0) : source[2]);
+    const heightCandidate =
+      source.height ?? (source.bottom != null ? source.bottom - (source.top ?? source.y ?? 0) : source[3]);
+    const width = clamp(widthCandidate, 0, frameWidth - left);
+    const height = clamp(heightCandidate, 0, frameHeight - top);
+
+    return { left, top, width, height };
+  }
+
+  async detect(videoElement) {
+    if (!this.ready || !this.human || !videoElement?.videoWidth) {
+      return [];
     }
 
-    async getFallbackDetector() {
-      if (this.fallbackDetector && this.fallbackReady) {
-        return this.fallbackDetector;
-      }
-      if (this.loadingFallbackPromise) {
-        await this.loadingFallbackPromise;
-        return this.fallbackDetector;
-      }
+    const frameWidth = videoElement.videoWidth;
+    const frameHeight = videoElement.videoHeight;
 
-      this.loadingFallback = true;
-      const loadPromise = (async () => {
-        try {
-          if (!this.fallbackDetector) {
-            this.fallbackDetector = new SimpleFaceDetector();
-          }
+    const result = await this.human.detect(videoElement);
+    const faces = Array.isArray(result?.face) ? result.face : [];
 
-          await this.fallbackDetector.load();
-          this.fallbackReady = true;
-          this.available = true;
-          this.usingFallback = true;
-          return this.fallbackDetector;
-        } catch (error) {
-          console.warn('加载离线人脸检测器失败', error);
-          this.fallbackDetector = null;
-          this.fallbackReady = false;
-          if (!this.nativeDetector) {
-            this.available = false;
-          }
-          this.usingFallback = false;
-          return null;
-        } finally {
-          this.loadingFallback = false;
-          this.loadingFallbackPromise = null;
-          if (typeof reflectFaceDetectorSupport === 'function') {
-            requestAnimationFrame(() => reflectFaceDetectorSupport(this.faces));
-          }
-        }
-      })();
+    return faces.map((face) => ({
+      boundingBox: this.extractBoundingBox(face, frameWidth, frameHeight),
+      landmarks: this.buildLandmarks(face, frameWidth, frameHeight),
+    }));
+  }
+}
 
-      this.loadingFallbackPromise = loadPromise;
-      return loadPromise;
-    }
+class FaceProcessor {
+  constructor(options = {}) {
+    this.onDetectorChange = typeof options.onDetectorChange === 'function' ? options.onDetectorChange : null;
+    this.nativeDetector = null;
+    this.available = false;
+    this.supportsNative = 'FaceDetector' in window;
+    this.loadingFallback = false;
+    this.loadingFallbackPromise = null;
+    this.loadingHuman = false;
+    this.loadingHumanPromise = null;
+    this.usingFallback = false;
+    this.usingHuman = false;
+    this.faces = [];
+    this.lastDetection = 0;
+    this.cooldown = 120;
+    this.fallbackDetector = null;
+    this.fallbackReady = false;
+    this.simpleFallback = null;
+    this.humanDetector = null;
+    this.humanReady = false;
+    this.fallbackMissCount = 0;
+    this.activeDetectorType = null;
 
-    normalizeDetection(result, videoElement) {
-      const videoWidth = videoElement.videoWidth || 0;
-      const videoHeight = videoElement.videoHeight || 0;
-      const clamp = (value, min, max) => Math.min(Math.max(value ?? 0, min), max);
-
-      const boundingSource = result?.boundingBox ?? result?.bounding ?? null;
-      const detectionBox = result?.detection?.box ?? result?.detection?._box ?? null;
-
-      const sourceBox = boundingSource ||
-        (detectionBox
-          ? {
-              left: detectionBox.x ?? detectionBox.left,
-              top: detectionBox.y ?? detectionBox.top,
-              width: detectionBox.width,
-              height: detectionBox.height,
-            }
-          : null);
-
-      if (!sourceBox) {
-        return null;
-      }
-
-      const width = clamp(sourceBox.width, 0, videoWidth);
-      const height = clamp(sourceBox.height, 0, videoHeight);
-      const bounding = {
-        left: clamp(sourceBox.left ?? sourceBox.x, 0, Math.max(0, videoWidth - width)),
-        top: clamp(sourceBox.top ?? sourceBox.y, 0, Math.max(0, videoHeight - height)),
-        width,
-        height,
-      };
-
-      const typedLandmarks = [];
-      if (Array.isArray(result?.landmarks)) {
-        result.landmarks.forEach((point) => {
-          if (!point) return;
-          typedLandmarks.push({
-            x: clamp(point.x, 0, videoWidth),
-            y: clamp(point.y, 0, videoHeight),
-            type: point.type,
-          });
-        });
-      } else if (result?.landmarks) {
-        const mapLandmarks = (getter, type) => {
-          const points = typeof getter === 'function' ? getter.call(result.landmarks) : [];
-          if (!Array.isArray(points)) return;
-          points.forEach((point) => {
-            if (!point) return;
-            typedLandmarks.push({
-              x: clamp(point.x ?? point._x ?? 0, 0, videoWidth),
-              y: clamp(point.y ?? point._y ?? 0, 0, videoHeight),
-              type,
-            });
-          });
-        };
-
-        mapLandmarks(result.landmarks.getLeftEye, 'leftEye');
-        mapLandmarks(result.landmarks.getRightEye, 'rightEye');
-
-        const nose = result.landmarks.getNose?.() ?? [];
-        if (nose.length) {
-          const nosePoint = nose[Math.floor(nose.length / 2)];
-          if (nosePoint) {
-            typedLandmarks.push({
-              x: clamp(nosePoint.x ?? nosePoint._x ?? 0, 0, videoWidth),
-              y: clamp(nosePoint.y ?? nosePoint._y ?? 0, 0, videoHeight),
-              type: 'nose',
-            });
-          }
-        }
-
-        const mouth = result.landmarks.getMouth?.() ?? [];
-        if (mouth.length) {
-          const mouthPoint = mouth[Math.floor(mouth.length / 2)];
-          if (mouthPoint) {
-            typedLandmarks.push({
-              x: clamp(mouthPoint.x ?? mouthPoint._x ?? 0, 0, videoWidth),
-              y: clamp(mouthPoint.y ?? mouthPoint._y ?? 0, 0, videoHeight),
-              type: 'mouth',
-            });
-          }
-        }
-      }
-
-      return { boundingBox: bounding, landmarks: typedLandmarks };
-    }
-
-    async detect(videoElement) {
-      if (!videoElement?.videoWidth) return this.faces;
-      const now = performance.now();
-      if (now - this.lastDetection < this.cooldown) {
-        return this.faces;
-      }
-
-      if (this.nativeDetector) {
-        try {
-          this.faces = await this.nativeDetector.detect(videoElement);
-          this.lastDetection = now;
-          return this.faces;
-        } catch (error) {
-          console.warn('人脸检测失败，尝试启用离线检测器', error);
-          this.faces = [];
-          this.nativeDetector = null;
-          this.available = false;
-          this.supportsNative = false;
-          this.prepareFallback();
-        }
-      }
-
-      const fallbackDetector = await this.getFallbackDetector();
-      if (!fallbackDetector) {
-        return this.faces;
-      }
-
+    if (this.supportsNative) {
       try {
-        const detections = await fallbackDetector.detect(videoElement);
-        const normalized = Array.isArray(detections)
-          ? detections
-              .map((result) => this.normalizeDetection(result, videoElement))
-              .filter(Boolean)
-          : [];
+        this.nativeDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 5 });
+        this.available = true;
+        this.activeDetectorType = 'native';
+        this.notifyDetectorChange();
+      } catch (error) {
+        console.warn('初始化 FaceDetector 失败', error);
+        this.nativeDetector = null;
+        this.supportsNative = false;
+      }
+    }
+  }
 
-        this.faces = normalized;
-        this.lastDetection = now;
+  notifyDetectorChange() {
+    if (this.onDetectorChange) {
+      this.onDetectorChange(this.getActiveDetectorName(), this.activeDetectorType);
+    }
+  }
+
+  setActiveDetectorType(type) {
+    if (this.activeDetectorType === type) return;
+    this.activeDetectorType = type;
+    this.notifyDetectorChange();
+  }
+
+  getActiveDetectorName() {
+    switch (this.activeDetectorType) {
+      case 'native':
+        return '系统内置人脸检测器';
+      case 'human':
+        return 'Human AI 人脸检测器';
+      case 'simple':
+        return '肤色分析离线检测器';
+      default:
+        return this.available ? '检测器已准备' : '未加载成功任何人脸识别模型';
+    }
+  }
+
+  hasNativeSupport() {
+    return !!this.nativeDetector;
+  }
+
+  isFallbackLoading() {
+    return this.loadingFallback || this.loadingHuman;
+  }
+
+  isUsingFallback() {
+    return this.usingFallback;
+  }
+
+  isUsingHuman() {
+    return this.usingHuman;
+  }
+
+  async prepareFallback() {
+    if (this.supportsNative) return;
+    try {
+      await this.getFallbackDetector();
+    } catch (error) {
+      console.warn('离线人脸检测器预加载失败', error);
+    }
+  }
+
+  async getHumanDetector() {
+    if (this.humanDetector && this.humanReady) {
+      return this.humanDetector;
+    }
+    if (this.loadingHumanPromise) {
+      await this.loadingHumanPromise;
+      return this.humanDetector;
+    }
+
+    this.loadingHuman = true;
+    this.loadingHumanPromise = (async () => {
+      try {
+        if (!this.humanDetector) {
+          this.humanDetector = new HumanFaceDetector();
+        }
+        await this.humanDetector.load();
+        this.humanReady = true;
+        this.available = true;
+        return this.humanDetector;
+      } catch (error) {
+        console.warn('Human 人脸检测器不可用', error);
+        this.humanDetector = null;
+        this.humanReady = false;
+        return null;
+      } finally {
+        this.loadingHuman = false;
+        this.loadingHumanPromise = null;
+        if (typeof reflectFaceDetectorSupport === 'function') {
+          requestAnimationFrame(() => reflectFaceDetectorSupport(this.faces));
+        }
+      }
+    })();
+
+    await this.loadingHumanPromise;
+    return this.humanDetector;
+  }
+
+  async getFallbackDetector() {
+    if (this.fallbackDetector && this.fallbackReady) {
+      return this.fallbackDetector;
+    }
+    if (this.loadingFallbackPromise) {
+      await this.loadingFallbackPromise;
+      return this.fallbackDetector;
+    }
+
+    this.loadingFallback = true;
+    this.loadingFallbackPromise = (async () => {
+      try {
+        if (!this.simpleFallback) {
+          this.simpleFallback = new SimpleFaceDetector();
+        }
+        await this.simpleFallback.load();
+        this.fallbackDetector = this.simpleFallback;
+        this.fallbackReady = true;
         this.available = true;
         this.usingFallback = true;
+        this.usingHuman = false;
+        this.setActiveDetectorType('simple');
+        return this.fallbackDetector;
       } catch (error) {
-        console.warn('离线人脸检测失败', error);
-        this.faces = [];
+        console.warn('加载离线人脸检测器失败', error);
+        this.simpleFallback = null;
+        this.fallbackReady = false;
+        const humanDetector = await this.getHumanDetector();
+        if (humanDetector) {
+          this.fallbackDetector = humanDetector;
+          this.fallbackReady = true;
+          this.usingFallback = true;
+          this.usingHuman = true;
+          this.setActiveDetectorType('human');
+          return humanDetector;
+        }
         if (!this.nativeDetector) {
           this.available = false;
+          this.setActiveDetectorType(null);
         }
+        this.usingFallback = false;
+        this.usingHuman = false;
+        return null;
+      } finally {
+        this.loadingFallback = false;
+        this.loadingFallbackPromise = null;
+        if (typeof reflectFaceDetectorSupport === 'function') {
+          requestAnimationFrame(() => reflectFaceDetectorSupport(this.faces));
+        }
+      }
+    })();
+
+    await this.loadingFallbackPromise;
+    return this.fallbackDetector;
+  }
+
+  normalizeDetection(result, videoElement) {
+    const videoWidth = videoElement.videoWidth || 0;
+    const videoHeight = videoElement.videoHeight || 0;
+    const clamp = (value, min, max) => Math.min(Math.max(value ?? 0, min), max);
+
+    const boundingSource = result?.boundingBox ?? result?.bounding ?? null;
+    const detectionBox = result?.detection?.box ?? result?.detection?._box ?? null;
+
+    const sourceBox =
+      boundingSource ||
+      (detectionBox
+        ? {
+            left: detectionBox.x ?? detectionBox.left,
+            top: detectionBox.y ?? detectionBox.top,
+            width: detectionBox.width,
+            height: detectionBox.height,
+          }
+        : null);
+
+    if (!sourceBox) {
+      return null;
+    }
+
+    const width = clamp(sourceBox.width, 0, videoWidth);
+    const height = clamp(sourceBox.height, 0, videoHeight);
+    const bounding = {
+      left: clamp(sourceBox.left ?? sourceBox.x, 0, Math.max(0, videoWidth - width)),
+      top: clamp(sourceBox.top ?? sourceBox.y, 0, Math.max(0, videoHeight - height)),
+      width,
+      height,
+    };
+
+    const typedLandmarks = [];
+    if (Array.isArray(result?.landmarks)) {
+      result.landmarks.forEach((point) => {
+        if (!point) return;
+        typedLandmarks.push({
+          x: clamp(point.x, 0, videoWidth),
+          y: clamp(point.y, 0, videoHeight),
+          type: point.type,
+        });
+      });
+    } else if (result?.landmarks) {
+      const mapLandmarks = (getter, type) => {
+        const points = typeof getter === 'function' ? getter.call(result.landmarks) : [];
+        if (!Array.isArray(points)) return;
+        points.forEach((point) => {
+          if (!point) return;
+          typedLandmarks.push({
+            x: clamp(point.x ?? point._x ?? 0, 0, videoWidth),
+            y: clamp(point.y ?? point._y ?? 0, 0, videoHeight),
+            type,
+          });
+        });
+      };
+
+      mapLandmarks(result.landmarks.getLeftEye, 'leftEye');
+      mapLandmarks(result.landmarks.getRightEye, 'rightEye');
+
+      const nose = result.landmarks.getNose?.() ?? [];
+      if (nose.length) {
+        const nosePoint = nose[Math.floor(nose.length / 2)];
+        if (nosePoint) {
+          typedLandmarks.push({
+            x: clamp(nosePoint.x ?? nosePoint._x ?? 0, 0, videoWidth),
+            y: clamp(nosePoint.y ?? nosePoint._y ?? 0, 0, videoHeight),
+            type: 'nose',
+          });
+        }
+      }
+
+      const mouth = result.landmarks.getMouth?.() ?? [];
+      if (mouth.length) {
+        const mouthPoint = mouth[Math.floor(mouth.length / 2)];
+        if (mouthPoint) {
+          typedLandmarks.push({
+            x: clamp(mouthPoint.x ?? mouthPoint._x ?? 0, 0, videoWidth),
+            y: clamp(mouthPoint.y ?? mouthPoint._y ?? 0, 0, videoHeight),
+            type: 'mouth',
+          });
+        }
+      }
+    }
+
+    return { boundingBox: bounding, landmarks: typedLandmarks };
+  }
+
+  async runDetector(detector, videoElement) {
+    if (!detector) return [];
+    try {
+      const detections = await detector.detect(videoElement);
+      return Array.isArray(detections)
+        ? detections
+            .map((result) => this.normalizeDetection(result, videoElement))
+            .filter(Boolean)
+        : [];
+    } catch (error) {
+      const label = detector instanceof HumanFaceDetector ? 'Human 人脸检测器' : '离线人脸检测器';
+      console.warn(`${label} 运行失败`, error);
+      return [];
+    }
+  }
+
+  async detect(videoElement) {
+    if (!videoElement?.videoWidth) return this.faces;
+    const now = performance.now();
+    if (now - this.lastDetection < this.cooldown) {
+      return this.faces;
+    }
+
+    if (this.nativeDetector) {
+      try {
+        this.faces = await this.nativeDetector.detect(videoElement);
+        this.lastDetection = now;
+        this.available = true;
+        this.usingFallback = false;
+        this.usingHuman = false;
+        this.setActiveDetectorType('native');
+        return this.faces;
+      } catch (error) {
+        console.warn('人脸检测失败，尝试启用离线检测器', error);
+        this.faces = [];
+        this.nativeDetector = null;
+        this.available = false;
+        this.supportsNative = false;
+        this.setActiveDetectorType(null);
+        this.prepareFallback();
+      }
+    }
+
+    const fallbackDetector = await this.getFallbackDetector();
+    if (!fallbackDetector) {
+      if (!this.nativeDetector) {
+        this.available = false;
+        this.setActiveDetectorType(null);
       }
       return this.faces;
     }
+
+    let normalized = await this.runDetector(fallbackDetector, videoElement);
+
+    if (!normalized.length && !(fallbackDetector instanceof HumanFaceDetector)) {
+      this.fallbackMissCount += 1;
+      if (this.fallbackMissCount >= 3) {
+        const humanDetector = await this.getHumanDetector();
+        if (humanDetector) {
+          this.fallbackDetector = humanDetector;
+          this.fallbackReady = true;
+          normalized = await this.runDetector(humanDetector, videoElement);
+          this.fallbackMissCount = 0;
+        }
+      }
+    } else {
+      this.fallbackMissCount = 0;
+    }
+
+    this.usingFallback = !!this.fallbackDetector;
+    this.usingHuman = this.fallbackDetector instanceof HumanFaceDetector;
+
+    this.faces = normalized;
+    this.lastDetection = now;
+    if (this.usingFallback || this.usingHuman || this.nativeDetector) {
+      this.available = true;
+    }
+
+    if (this.usingHuman) {
+      this.setActiveDetectorType('human');
+    } else if (this.usingFallback) {
+      this.setActiveDetectorType('simple');
+    } else if (!this.available) {
+      this.setActiveDetectorType(null);
+    }
+
+    return this.faces;
   }
+}
 class BeautyController {
   constructor() {
     this.settings = {
@@ -783,7 +1130,9 @@ class ModelManager {
 }
 
 const cameraController = new CameraController(video);
-const faceProcessor = new FaceProcessor();
+const faceProcessor = new FaceProcessor({
+  onDetectorChange: (name, type) => setDetectorLabel(name, type),
+});
 const beautyController = new BeautyController();
 const modelManager = new ModelManager();
 
@@ -906,10 +1255,23 @@ function reflectFaceDetectorSupport(faces = []) {
   if (!faceDetectorMessage) return;
 
   const fallbackLoading = typeof faceProcessor.isFallbackLoading === 'function' && faceProcessor.isFallbackLoading();
+  const usingFallback = typeof faceProcessor.isUsingFallback === 'function' && faceProcessor.isUsingFallback();
+  const usingHuman = typeof faceProcessor.isUsingHuman === 'function' && faceProcessor.isUsingHuman();
+
+  const detectorSourceText = usingHuman
+    ? 'Human AI 人脸检测器'
+    : usingFallback
+    ? '离线人脸检测器'
+    : '系统内置人脸检测器';
+  const badgeSuffix = usingHuman
+    ? '（Human 模型）'
+    : usingFallback
+    ? '（离线检测器）'
+    : '（系统检测器）';
 
   if (!faceProcessor.available) {
     if (fallbackLoading) {
-      faceDetectorMessage.textContent = '正在加载离线人脸检测器，小狗脸滤镜稍后可用。';
+      faceDetectorMessage.textContent = '正在加载备用人脸检测器，小狗脸滤镜稍后可用。';
       faceDetectorMessage.dataset.state = 'pending';
       updateFaceStatusBadge('pending', '检测准备中...');
       if (dogFaceToggle && !dogFaceToggle.disabled) {
@@ -931,13 +1293,9 @@ function reflectFaceDetectorSupport(faces = []) {
     dogFaceToggle.disabled = false;
   }
 
-  const usingFallback = typeof faceProcessor.isUsingFallback === 'function' && faceProcessor.isUsingFallback();
-  const detectorSourceText = usingFallback ? '离线人脸检测器' : '系统内置人脸检测器';
-  const badgeSuffix = usingFallback ? '（离线检测器）' : '（系统检测器）';
-
   if (!video?.srcObject) {
     faceDetectorMessage.textContent = usingFallback
-      ? '摄像头准备中，已启用离线人脸检测器，小狗脸滤镜将自动启用。'
+      ? `摄像头准备中，已启用${detectorSourceText}，小狗脸滤镜将自动启用。`
       : '摄像头准备中，小狗脸滤镜将自动启用。';
     faceDetectorMessage.dataset.state = 'pending';
     updateFaceStatusBadge('pending', '检测中...');
@@ -948,7 +1306,7 @@ function reflectFaceDetectorSupport(faces = []) {
 
   if (!dogFaceToggle?.checked) {
     faceDetectorMessage.textContent = usingFallback
-      ? '已关闭小狗脸滤镜，但离线人脸检测器仍在后台运行。'
+      ? `已关闭小狗脸滤镜，但${detectorSourceText}仍在后台运行。`
       : '已关闭小狗脸滤镜。';
     faceDetectorMessage.dataset.state = 'inactive';
     updateFaceStatusBadge(hasFaces ? 'ready' : 'warning', hasFaces ? `已检测到人脸 ${badgeSuffix}` : `未检测到人脸 ${badgeSuffix}`);
