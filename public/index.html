@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>Beauty Face H5</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="viewer">
+        <div class="video-wrapper">
+          <video id="camera" autoplay playsinline muted></video>
+          <canvas id="outputCanvas"></canvas>
+          <div class="floating-controls">
+            <button id="switchCamera" class="floating-button" title="切换摄像头">🔄</button>
+            <button id="toggleFlash" class="floating-button" title="闪光灯">⚡</button>
+          </div>
+          <div class="zoom-controls">
+            <button id="zoomOut" aria-label="缩小">－</button>
+            <div id="zoomValue">100%</div>
+            <button id="zoomIn" aria-label="放大">＋</button>
+          </div>
+          <div id="statusOverlay" class="status-overlay" hidden>
+            <div class="spinner"></div>
+            <p id="statusMessage"></p>
+          </div>
+        </div>
+      </section>
+      <section class="control-panel">
+        <header>
+          <h1>美颜换脸控制</h1>
+          <button id="updateModels" class="secondary">检查模型更新</button>
+        </header>
+        <div class="download-status" hidden>
+          <div class="progress-text"></div>
+          <div class="progress-bar">
+            <div class="progress"></div>
+          </div>
+        </div>
+        <div class="control-group">
+          <h2>趣味换脸</h2>
+          <label class="switch">
+            <input type="checkbox" id="dogFaceToggle" checked />
+            <span>小狗脸滤镜</span>
+          </label>
+          <p id="faceDetectorMessage" class="helper-text"></p>
+        </div>
+        <div class="control-group">
+          <h2>美颜调节</h2>
+          <div class="slider">
+            <label for="whiten">美白</label>
+            <input type="range" id="whiten" min="0" max="100" value="20" />
+          </div>
+          <div class="slider">
+            <label for="slimFace">瘦脸</label>
+            <input type="range" id="slimFace" min="0" max="100" value="30" />
+          </div>
+          <div class="slider">
+            <label for="bigEyes">大眼</label>
+            <input type="range" id="bigEyes" min="0" max="100" value="40" />
+          </div>
+          <div class="slider">
+            <label for="autoMakeup">自动美妆</label>
+            <input type="range" id="autoMakeup" min="0" max="100" value="25" />
+          </div>
+        </div>
+        <div class="control-group offline-status">
+          <h2>离线状态</h2>
+          <p id="offlineMessage">准备就绪，可离线使用。</p>
+        </div>
+      </section>
+    </main>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "models": [
+    {
+      "name": "dog-face",
+      "url": "models/dog-face.json",
+      "description": "基础小狗脸滤镜模型参数",
+      "size": 1024
+    }
+  ]
+}
