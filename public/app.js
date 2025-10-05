@@ -309,8 +309,9 @@ class CameraController {
       this.loadingFallback = true;
       const loadPromise = (async () => {
         const tfUrl = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js';
-        const faceApiUrl = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
-        const weightsUrl = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+        const faceApiVersion = '1.7.23';
+        const faceApiUrl = `https://cdn.jsdelivr.net/npm/@vladmandic/face-api@${faceApiVersion}/dist/face-api.min.js`;
+        const weightsUrl = `https://cdn.jsdelivr.net/npm/@vladmandic/face-api@${faceApiVersion}/model/`; // vladmandic distribution keeps the models inside the package
 
         try {
           await this.ensureScript(tfUrl, () => typeof window.tf !== 'undefined');
