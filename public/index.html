@@ -44,10 +44,13 @@
             <input type="checkbox" id="dogFaceToggle" checked />
             <span>小狗脸滤镜</span>
           </label>
-          <p id="faceDetectorMessage" class="helper-text"></p>
+          <p id="faceDetectorMessage" class="helper-text" data-state="pending" aria-live="polite">摄像头准备中，小狗脸滤镜将自动启用。</p>
         </div>
         <div class="control-group">
-          <h2>美颜调节</h2>
+          <div class="section-heading">
+            <h2>美颜调节</h2>
+            <span id="faceStatusBadge" class="status-badge" data-state="pending" role="status" aria-live="polite">检测中...</span>
+          </div>
           <div class="slider">
             <label for="whiten">美白</label>
             <input type="range" id="whiten" min="0" max="100" value="20" />
