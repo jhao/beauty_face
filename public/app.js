@@ -718,15 +718,28 @@ function setupControls() {
   });
 }
 
-function registerServiceWorker() {
-  if (!('serviceWorker' in navigator)) return;
-  window.addEventListener('load', () => {
-    navigator.serviceWorker
-      .register('service-worker.js')
-      .then(() => console.log('Service worker 注册成功'))
-      .catch((error) => console.error('Service worker 注册失败', error));
-  });
-}
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+
+    if (!window.isSecureContext) {
+      console.warn('当前环境不是安全上下文，跳过 Service worker 注册');
+      return;
+    }
+
+    window.addEventListener('load', async () => {
+      try {
+        const workerUrl = new URL('service-worker.js', window.location.href);
+        await navigator.serviceWorker.register(workerUrl);
+        console.log('Service worker 注册成功');
+      } catch (error) {
+        if (error?.name === 'SecurityError') {
+          console.warn('由于证书问题，Service worker 注册已被跳过。');
+          return;
+        }
+        console.error('Service worker 注册失败', error);
+      }
+    });
+  }
 
 function setupOfflineHandlers() {
   window.addEventListener('online', updateOfflineBanner);
