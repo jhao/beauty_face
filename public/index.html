@@ -71,7 +71,14 @@
         </div>
         <div class="control-group offline-status">
           <h2>离线状态</h2>
-          <p id="offlineMessage">准备就绪，可离线使用。</p>
+          <label class="switch">
+            <input type="checkbox" id="offlineModeToggle" />
+            <span>启用离线运行</span>
+          </label>
+          <p id="offlineModeDescription" class="helper-text" data-state="inactive">
+            离线运行处于关闭状态。启用后将缓存必要资源。
+          </p>
+          <p id="offlineMessage">离线运行未启用。</p>
           <div class="console-panel">
             <h3>系统日志</h3>
             <div id="consoleOutput" class="console-output" role="log" aria-live="polite"></div>

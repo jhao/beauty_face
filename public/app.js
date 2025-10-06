@@ -17,6 +17,8 @@ const toggleFlashButton = document.getElementById('toggleFlash');
 const statusOverlay = document.getElementById('statusOverlay');
 const statusMessage = document.getElementById('statusMessage');
 const offlineMessage = document.getElementById('offlineMessage');
+const offlineModeToggle = document.getElementById('offlineModeToggle');
+const offlineModeDescription = document.getElementById('offlineModeDescription');
 const updateModelsButton = document.getElementById('updateModels');
 const downloadStatus = document.querySelector('.download-status');
 const progressText = downloadStatus?.querySelector('.progress-text');
@@ -34,6 +36,9 @@ function setDetectorLabel(text = '未加载成功任何人脸识别模型', type
 
 const consoleBuffer = [];
 const maxConsoleEntries = 200;
+const BEAUTY_FACE_CACHE_PREFIX = 'beauty-face-cache';
+
+let serviceWorkerRegistration = null;
 
 function formatConsoleArgs(args) {
   return args
@@ -1594,10 +1599,22 @@ function handleVideoReady() {
 }
 
 function updateOfflineBanner() {
-  if (navigator.onLine) {
-    offlineMessage.textContent = '准备就绪，可离线使用。';
-  } else {
+  if (!offlineMessage) return;
+
+  if (!offlineModeToggle?.checked) {
+    offlineMessage.textContent = '离线运行未启用。';
+    return;
+  }
+
+  if (!navigator.onLine) {
     offlineMessage.textContent = '当前为离线模式，功能受缓存支持。';
+    return;
+  }
+
+  if (navigator.serviceWorker?.controller) {
+    offlineMessage.textContent = '已启用离线运行，可在断网时继续使用。';
+  } else {
+    offlineMessage.textContent = '离线运行已启用，正在准备缓存...';
   }
 }
 
@@ -1744,6 +1761,10 @@ function setupControls() {
     toggleFlashButton.classList.toggle('active', enabled);
   });
 
+  if (offlineModeToggle) {
+    offlineModeToggle.addEventListener('change', handleOfflineToggleChange);
+  }
+
   dogFaceToggle.addEventListener('change', () => {
     reflectFaceDetectorSupport(faceProcessor.faces);
   });
@@ -1778,28 +1799,146 @@ function setupControls() {
   });
 }
 
-  function registerServiceWorker() {
-    if (!('serviceWorker' in navigator)) return;
+function setOfflineModeDescription(message, state = 'inactive') {
+  if (!offlineModeDescription) return;
+  offlineModeDescription.textContent = message;
+  offlineModeDescription.dataset.state = state;
+}
 
-    if (!window.isSecureContext) {
-      console.warn('当前环境不是安全上下文，跳过 Service worker 注册');
-      return;
-    }
-
-    window.addEventListener('load', async () => {
-      try {
-        const workerUrl = new URL('service-worker.js', window.location.href);
-        await navigator.serviceWorker.register(workerUrl);
-        console.log('Service worker 注册成功');
-      } catch (error) {
-        if (error?.name === 'SecurityError') {
-          console.warn('由于证书问题，Service worker 注册已被跳过。');
-          return;
-        }
-        console.error('Service worker 注册失败', error);
-      }
-    });
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    throw new Error('当前浏览器不支持离线运行。');
   }
+
+  if (!window.isSecureContext) {
+    throw new Error('当前环境不是安全上下文，无法启用离线运行。');
+  }
+
+  if (serviceWorkerRegistration) {
+    return serviceWorkerRegistration;
+  }
+
+  const workerUrl = new URL('service-worker.js', window.location.href);
+  const registration = await navigator.serviceWorker.register(workerUrl);
+  serviceWorkerRegistration = registration;
+
+  try {
+    const readyRegistration = await navigator.serviceWorker.ready;
+    serviceWorkerRegistration = readyRegistration;
+  } catch (error) {
+    console.warn('等待 Service worker 就绪时出现问题', error);
+  }
+
+  console.log('Service worker 注册成功');
+  return serviceWorkerRegistration;
+}
+
+async function unregisterServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+
+  const registrations = await navigator.serviceWorker.getRegistrations();
+  const relatedRegistrations = registrations.filter((registration) => {
+    const scriptURL =
+      registration.active?.scriptURL || registration.waiting?.scriptURL || registration.installing?.scriptURL;
+    return typeof scriptURL === 'string' && scriptURL.endsWith('/service-worker.js');
+  });
+
+  let unregistered = false;
+  await Promise.all(
+    relatedRegistrations.map(async (registration) => {
+      try {
+        const result = await registration.unregister();
+        unregistered = unregistered || result;
+      } catch (error) {
+        console.warn('注销 Service worker 失败', error);
+        throw error;
+      }
+    })
+  );
+
+  serviceWorkerRegistration = null;
+
+  if ('caches' in window) {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith(BEAUTY_FACE_CACHE_PREFIX)).map((key) => caches.delete(key)));
+  }
+
+  if (unregistered) {
+    console.log('Service worker 已注销');
+  }
+}
+
+async function handleOfflineToggleChange(event) {
+  if (!offlineModeToggle) return;
+
+  const enabled = event.target.checked;
+  offlineModeToggle.disabled = true;
+
+  if (enabled) {
+    setOfflineModeDescription('正在配置离线运行...', 'pending');
+    try {
+      await registerServiceWorker();
+      setOfflineModeDescription('离线运行已启用，必要资源将自动缓存。', 'active');
+      updateOfflineBanner();
+    } catch (error) {
+      console.error('Service worker 注册失败', error);
+      offlineModeToggle.checked = false;
+      const message = error?.message ? `离线运行启用失败：${error.message}` : '离线运行启用失败，请稍后重试。';
+      setOfflineModeDescription(message, 'error');
+      updateOfflineBanner();
+    } finally {
+      offlineModeToggle.disabled = false;
+    }
+    return;
+  }
+
+  setOfflineModeDescription('正在关闭离线运行...', 'pending');
+  try {
+    await unregisterServiceWorker();
+    setOfflineModeDescription('离线运行已关闭，如需离线访问请重新启用。', 'inactive');
+  } catch (error) {
+    console.error('Service worker 注销失败', error);
+    setOfflineModeDescription('离线运行关闭时出现问题，请刷新页面后重试。', 'warning');
+  } finally {
+    offlineModeToggle.disabled = false;
+    updateOfflineBanner();
+  }
+}
+
+function initializeOfflineMode() {
+  if (!offlineModeToggle || !offlineModeDescription) {
+    updateOfflineBanner();
+    return;
+  }
+
+  if (!('serviceWorker' in navigator)) {
+    offlineModeToggle.disabled = true;
+    setOfflineModeDescription('当前浏览器不支持离线运行。', 'unsupported');
+    updateOfflineBanner();
+    return;
+  }
+
+  if (!window.isSecureContext) {
+    offlineModeToggle.disabled = true;
+    setOfflineModeDescription('需要在安全的 HTTPS 环境下才能启用离线运行。', 'unsupported');
+    updateOfflineBanner();
+    return;
+  }
+
+  offlineModeToggle.checked = false;
+  setOfflineModeDescription('离线运行处于关闭状态。启用后将缓存必要资源。', 'inactive');
+  updateOfflineBanner();
+
+  unregisterServiceWorker().catch((error) => {
+    console.warn('初始化离线模式时注销 Service worker 失败', error);
+  });
+
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (offlineModeToggle.checked) {
+      updateOfflineBanner();
+    }
+  });
+}
 
 function setupOfflineHandlers() {
   window.addEventListener('online', updateOfflineBanner);
@@ -1810,7 +1949,7 @@ function setupOfflineHandlers() {
 video.addEventListener('loadeddata', handleVideoReady, { once: true });
 video.addEventListener('playing', handleVideoReady, { once: true });
 
-registerServiceWorker();
+initializeOfflineMode();
 setupOfflineHandlers();
 setupControls();
 reflectFaceDetectorSupport();
