@@ -454,6 +454,8 @@ class HumanFaceDetector {
     this.ready = false;
     this.human = null;
     this.loadingPromise = null;
+    this.modelBasePath = null;
+    this.modelManifest = null;
   }
 
   async load() {
@@ -465,6 +467,7 @@ class HumanFaceDetector {
 
     this.loadingPromise = (async () => {
       try {
+        const modelBasePath = await this.resolveModelBasePath();
         const globalNamespace = window.Human ?? window.human ?? null;
         const ctorCandidate =
           typeof globalNamespace === 'function'
@@ -476,7 +479,7 @@ class HumanFaceDetector {
         const baseConfig = {
           backend: 'webgl',
           cacheSensitivity: 0,
-          modelBasePath: './models',
+          modelBasePath,
           filter: { enabled: false },
           face: {
             enabled: true,
@@ -540,6 +543,172 @@ class HumanFaceDetector {
 
     await this.loadingPromise;
     return this;
+  }
+
+  normalizeBasePath(path) {
+    if (!path) return null;
+    const trimmed = `${path}`.trim();
+    if (!trimmed) return null;
+    return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+  }
+
+  async resolveModelBasePath() {
+    if (this.modelBasePath) return this.modelBasePath;
+
+    const candidateSources = [
+      './models/human/',
+      './models/',
+      'models/',
+      'https://cdn.jsdelivr.net/npm/@vladmandic/human-models/models/',
+      'https://fastly.jsdelivr.net/npm/@vladmandic/human-models/models/',
+      'https://unpkg.com/@vladmandic/human-models@latest/models/',
+      'https://raw.githubusercontent.com/vladmandic/human-models/main/models/',
+    ];
+
+    for (const candidate of candidateSources) {
+      const normalized = this.normalizeBasePath(candidate);
+      if (!normalized) continue;
+      try {
+        const manifest = await this.fetchHumanManifest(normalized);
+        if (!manifest) continue;
+        this.modelManifest = manifest;
+        await this.preloadHumanModelFiles(normalized, manifest);
+        this.modelBasePath = normalized;
+        if (normalized.startsWith('http')) {
+          console.info(`已从远程源 ${normalized} 预加载 Human 模型文件`);
+        }
+        return this.modelBasePath;
+      } catch (error) {
+        console.warn(`Human 模型源不可用：${normalized}`, error);
+      }
+    }
+
+    throw new Error('无法加载 Human 模型，请检查网络连接或运行 python scripts/download_models.py 下载模型。');
+  }
+
+  async fetchHumanManifest(basePath) {
+    const manifestUrl = `${basePath}models.json`;
+    const init = manifestUrl.startsWith('http') ? { mode: 'cors' } : {};
+
+    const response = await fetch(manifestUrl, { cache: 'no-cache', ...init });
+    if (!response?.ok) {
+      throw new Error(`HTTP ${response?.status ?? '错误'}：Human 模型清单加载失败`);
+    }
+
+    let manifest;
+    try {
+      manifest = await response.clone().json();
+    } catch (error) {
+      throw new Error('Human 模型清单解析失败');
+    }
+
+    if (typeof caches !== 'undefined') {
+      try {
+        const cache = await caches.open('beauty-face-human-models');
+        await cache.put(manifestUrl, response.clone());
+      } catch (error) {
+        console.warn('缓存 Human 模型清单失败', error);
+      }
+    }
+
+    return manifest;
+  }
+
+  collectModelEntries(node, collector) {
+    if (!node) return;
+    if (Array.isArray(node)) {
+      node.forEach((item) => this.collectModelEntries(item, collector));
+      return;
+    }
+
+    if (typeof node === 'object') {
+      if ('file' in node || 'name' in node || 'url' in node) {
+        collector.add(node);
+        return;
+      }
+      Object.values(node).forEach((value) => this.collectModelEntries(value, collector));
+    }
+  }
+
+  buildModelUrl(basePath, filePath) {
+    if (!filePath) return null;
+    if (/^https?:\/\//i.test(filePath)) {
+      return filePath;
+    }
+    const normalized = this.normalizeBasePath(basePath ?? './models');
+    if (!normalized) return null;
+    let sanitized = `${filePath}`.replace(/^\.\//, '');
+    if (normalized.endsWith('/models/') && sanitized.startsWith('models/')) {
+      sanitized = sanitized.slice(7);
+    }
+    return `${normalized}${sanitized}`;
+  }
+
+  async preloadHumanModelFiles(basePath, manifest) {
+    if (!manifest) return;
+    const entries = new Set();
+    if (manifest.models) {
+      this.collectModelEntries(manifest.models, entries);
+    }
+    if (manifest.files) {
+      this.collectModelEntries(manifest.files, entries);
+    }
+    if (!entries.size) {
+      this.collectModelEntries(manifest, entries);
+    }
+
+    const seen = new Set();
+    for (const entry of entries) {
+      const fileCandidate = entry?.file ?? entry?.name ?? entry?.url;
+      if (!fileCandidate) continue;
+      const fileName = String(fileCandidate).split('/').pop();
+      if (!fileName || seen.has(fileName)) continue;
+      seen.add(fileName);
+
+      const fileUrl = this.buildModelUrl(basePath, fileName);
+      if (!fileUrl) continue;
+      await this.fetchAndCacheModelFile(fileUrl, true, basePath, seen);
+    }
+  }
+
+  async fetchAndCacheModelFile(url, parseJson = false, basePath = null, seen = new Set()) {
+    try {
+      const init = url.startsWith('http') ? { mode: 'cors' } : {};
+      const response = await fetch(url, { cache: 'force-cache', ...init });
+      if (!response?.ok) {
+        throw new Error(`HTTP ${response?.status ?? '错误'}`);
+      }
+
+      if (typeof caches !== 'undefined') {
+        try {
+          const cache = await caches.open('beauty-face-human-models');
+          await cache.put(url, response.clone());
+        } catch (error) {
+          console.warn(`缓存 Human 模型文件失败：${url}`, error);
+        }
+      }
+
+      if (parseJson && url.endsWith('.json')) {
+        try {
+          const json = await response.clone().json();
+          const weights = Array.isArray(json?.weightsManifest) ? json.weightsManifest : [];
+          for (const group of weights) {
+            if (!group?.paths) continue;
+            for (const weightPath of group.paths) {
+              if (!weightPath) continue;
+              const weightUrl = this.buildModelUrl(basePath, weightPath);
+              if (!weightUrl || seen.has(weightUrl)) continue;
+              seen.add(weightUrl);
+              await this.fetchAndCacheModelFile(weightUrl, false, basePath, seen);
+            }
+          }
+        } catch (error) {
+          console.warn(`解析 Human 模型文件失败：${url}`, error);
+        }
+      }
+    } catch (error) {
+      console.warn(`Human 模型预加载失败：${url}`, error);
+    }
   }
 
   clamp(value, min, max) {
