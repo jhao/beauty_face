@@ -473,23 +473,44 @@ class HumanFaceDetector {
               ? globalNamespace.Human
               : null;
 
+        const baseConfig = {
+          backend: 'webgl',
+          cacheSensitivity: 0,
+          modelBasePath: './models',
+          filter: { enabled: false },
+          face: {
+            enabled: true,
+            detector: { rotation: true },
+            mesh: { enabled: false },
+            iris: { enabled: false },
+            attention: { enabled: false },
+            emotion: { enabled: false },
+            description: { enabled: false },
+            age: { enabled: false },
+            gender: { enabled: false },
+          },
+          body: { enabled: false },
+          hand: { enabled: false },
+          gesture: { enabled: false },
+          object: { enabled: false },
+        };
+
         if (!this.human) {
           if (ctorCandidate) {
-            this.human = new ctorCandidate({
-              backend: 'webgl',
-              cacheSensitivity: 0,
-              modelBasePath: './models',
-              face: {
-                enabled: true,
-                detector: { rotation: true },
-                mesh: { enabled: true },
-                iris: { enabled: true },
-                attention: { enabled: true },
-              },
-            });
+            this.human = new ctorCandidate(baseConfig);
           } else if (globalNamespace && typeof globalNamespace.detect === 'function') {
             this.human = globalNamespace;
           }
+        }
+
+        if (this.human && typeof this.human.configure === 'function') {
+          this.human.configure(baseConfig);
+        } else if (this.human && typeof this.human.setConfig === 'function') {
+          this.human.setConfig(baseConfig);
+        } else if (this.human && typeof this.human.update === 'function') {
+          this.human.update(baseConfig);
+        } else if (this.human && typeof this.human.config === 'object') {
+          Object.assign(this.human.config, baseConfig);
         }
 
         if (!this.human || typeof this.human.detect !== 'function') {
@@ -960,6 +981,105 @@ class FaceProcessor {
 
     return this.faces;
   }
+
+  drawDogFace(ctx, face) {
+    if (!ctx || !face?.boundingBox) return;
+
+    const { left, top, width, height } = face.boundingBox;
+    if (!width || !height) return;
+
+    const findLandmark = (type, fallback) => {
+      const point = face?.landmarks?.find?.((item) => item.type === type);
+      return point ? { x: point.x, y: point.y } : fallback;
+    };
+
+    const centerX = left + width / 2;
+    const baseEyeY = top + height * 0.35;
+    const leftEye = findLandmark('leftEye', { x: left + width * 0.3, y: baseEyeY });
+    const rightEye = findLandmark('rightEye', { x: left + width * 0.7, y: baseEyeY });
+    const nose = findLandmark('nose', { x: centerX, y: top + height * 0.58 });
+    const mouth = findLandmark('mouth', { x: centerX, y: top + height * 0.78 });
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+
+    const earHeight = height * 0.65;
+    const earWidth = width * 0.35;
+
+    // Left ear
+    ctx.fillStyle = 'rgba(155, 112, 66, 0.9)';
+    ctx.beginPath();
+    ctx.moveTo(leftEye.x - width * 0.1, top + height * 0.1);
+    ctx.quadraticCurveTo(leftEye.x - earWidth * 0.6, top - earHeight * 0.35, leftEye.x - earWidth * 0.25, top + earHeight * 0.05);
+    ctx.quadraticCurveTo(leftEye.x - earWidth * 0.15, top + earHeight * 0.35, leftEye.x - width * 0.02, top + earHeight * 0.25);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(233, 184, 149, 0.75)';
+    ctx.beginPath();
+    ctx.moveTo(leftEye.x - width * 0.05, top + height * 0.18);
+    ctx.quadraticCurveTo(leftEye.x - earWidth * 0.35, top - earHeight * 0.1, leftEye.x - earWidth * 0.2, top + earHeight * 0.2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Right ear
+    ctx.fillStyle = 'rgba(155, 112, 66, 0.9)';
+    ctx.beginPath();
+    ctx.moveTo(rightEye.x + width * 0.1, top + height * 0.1);
+    ctx.quadraticCurveTo(rightEye.x + earWidth * 0.6, top - earHeight * 0.35, rightEye.x + earWidth * 0.25, top + earHeight * 0.05);
+    ctx.quadraticCurveTo(rightEye.x + earWidth * 0.15, top + earHeight * 0.35, rightEye.x + width * 0.02, top + earHeight * 0.25);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(233, 184, 149, 0.75)';
+    ctx.beginPath();
+    ctx.moveTo(rightEye.x + width * 0.05, top + height * 0.18);
+    ctx.quadraticCurveTo(rightEye.x + earWidth * 0.35, top - earHeight * 0.1, rightEye.x + earWidth * 0.2, top + earHeight * 0.2);
+    ctx.closePath();
+    ctx.fill();
+
+    // Face mask / muzzle
+    const muzzleWidth = width * 0.55;
+    const muzzleHeight = height * 0.45;
+    const muzzleCenterY = top + height * 0.65;
+    ctx.fillStyle = 'rgba(255, 238, 210, 0.88)';
+    ctx.beginPath();
+    ctx.ellipse(centerX, muzzleCenterY, muzzleWidth * 0.55, muzzleHeight * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Nose
+    const noseWidth = width * 0.12;
+    const noseHeight = height * 0.08;
+    ctx.fillStyle = '#5c3f35';
+    ctx.beginPath();
+    ctx.ellipse(nose.x, nose.y, noseWidth, noseHeight, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.beginPath();
+    ctx.ellipse(nose.x - noseWidth * 0.25, nose.y - noseHeight * 0.2, noseWidth * 0.4, noseHeight * 0.3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mouth lines
+    const mouthWidth = width * 0.18;
+    ctx.strokeStyle = '#5c3f35';
+    ctx.lineWidth = Math.max(2, width * 0.012);
+    ctx.beginPath();
+    ctx.moveTo(nose.x, nose.y + noseHeight * 0.8);
+    ctx.quadraticCurveTo(nose.x, mouth.y - noseHeight * 0.2, mouth.x - mouthWidth / 2, mouth.y);
+    ctx.moveTo(nose.x, nose.y + noseHeight * 0.8);
+    ctx.quadraticCurveTo(nose.x, mouth.y - noseHeight * 0.2, mouth.x + mouthWidth / 2, mouth.y);
+    ctx.stroke();
+
+    // Tongue
+    const tongueHeight = height * 0.18;
+    ctx.fillStyle = 'rgba(255, 105, 135, 0.85)';
+    ctx.beginPath();
+    ctx.ellipse(mouth.x, mouth.y + tongueHeight * 0.4, width * 0.12, tongueHeight * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
 }
 class BeautyController {
   constructor() {
@@ -975,35 +1095,92 @@ class BeautyController {
     this.settings[key] = value;
   }
 
-  applyGlobalFilters(canvas) {
-    const { whiten, autoMakeup } = this.settings;
-    const brightness = 1 + whiten * 0.5;
-    const saturation = 1 + autoMakeup * 0.6;
-    const contrast = 1 + autoMakeup * 0.2;
-    const softening = whiten > 0 ? ` blur(${(whiten * 2).toFixed(2)}px)` : '';
-    canvas.style.filter = `brightness(${brightness.toFixed(2)}) saturate(${saturation.toFixed(2)}) contrast(${contrast.toFixed(2)})${softening}`;
+  applyGlobalFilters(ctx, faces = []) {
+    if (!ctx) return;
+    if (ctx.canvas) {
+      ctx.canvas.style.filter = 'none';
+    }
+
+    if (!Array.isArray(faces) || faces.length === 0) return;
+
+    faces.forEach((face) => {
+      this.applyWhiten(ctx, face);
+      this.applyColorBoost(ctx, face);
+    });
   }
 
-  applySlimFace(ctx, width, height) {
-    const { slimFace } = this.settings;
-    if (slimFace <= 0) return;
-    ctx.save();
-    ctx.globalAlpha = Math.min(0.45, slimFace * 0.45);
-    const gradientLeft = ctx.createLinearGradient(0, 0, width * 0.3, 0);
-    gradientLeft.addColorStop(0, 'rgba(0,0,0,0.8)');
-    gradientLeft.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = gradientLeft;
-    ctx.fillRect(0, 0, width * 0.35, height);
+  applyWhiten(ctx, face) {
+    const { whiten } = this.settings;
+    if (whiten <= 0 || !face?.boundingBox) return;
 
-    const gradientRight = ctx.createLinearGradient(width, 0, width * 0.7, 0);
-    gradientRight.addColorStop(0, 'rgba(0,0,0,0.8)');
-    gradientRight.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = gradientRight;
-    ctx.fillRect(width * 0.65, 0, width * 0.35, height);
+    const { left, top, width, height } = face.boundingBox;
+    if (!width || !height) return;
+
+    const centerX = left + width / 2;
+    const centerY = top + height / 2;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = Math.min(0.35, whiten * 0.5);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.beginPath();
+    ctx.ellipse(centerX, centerY, width * 0.55, height * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
     ctx.restore();
   }
 
-  applyBigEyes(ctx, sourceCtx, face) {
+  applyColorBoost(ctx, face) {
+    const { autoMakeup } = this.settings;
+    if (autoMakeup <= 0 || !face?.boundingBox) return;
+
+    const { left, top, width, height } = face.boundingBox;
+    if (!width || !height) return;
+
+    const centerX = left + width / 2;
+    const centerY = top + height * 0.55;
+    const radiusX = width * 0.6;
+    const radiusY = height * 0.7;
+
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.25, autoMakeup * 0.25);
+    const gradient = ctx.createRadialGradient(centerX, centerY, Math.min(radiusX, radiusY) * 0.2, centerX, centerY, Math.max(radiusX, radiusY));
+    gradient.addColorStop(0, 'rgba(255, 214, 170, 0.85)');
+    gradient.addColorStop(1, 'rgba(255, 214, 170, 0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  applySlimFace(ctx, face) {
+    const { slimFace } = this.settings;
+    if (slimFace <= 0 || !face?.boundingBox) return;
+
+    const { left, top, width, height } = face.boundingBox;
+    if (!width || !height) return;
+
+    const intensity = Math.min(0.5, slimFace * 0.5);
+
+    ctx.save();
+    ctx.globalAlpha = intensity;
+
+    const leftGradient = ctx.createLinearGradient(left - width * 0.2, top, left + width * 0.15, top);
+    leftGradient.addColorStop(0, 'rgba(0,0,0,0.8)');
+    leftGradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = leftGradient;
+    ctx.fillRect(left - width * 0.2, top, width * 0.25, height);
+
+    const rightGradient = ctx.createLinearGradient(left + width - width * 0.15, top, left + width + width * 0.2, top);
+    rightGradient.addColorStop(0, 'rgba(0,0,0,0)');
+    rightGradient.addColorStop(1, 'rgba(0,0,0,0.8)');
+    ctx.fillStyle = rightGradient;
+    ctx.fillRect(left + width - width * 0.05, top, width * 0.25, height);
+
+    ctx.restore();
+  }
+
+  applyBigEyes(ctx, face) {
     const { bigEyes } = this.settings;
     if (bigEyes <= 0 || !face?.landmarks) return;
     const eyePoints = face.landmarks.filter((point) => point.type === 'leftEye' || point.type === 'rightEye');
@@ -1214,11 +1391,11 @@ async function renderFrame() {
 
   const faces = await faceProcessor.detect(video);
   reflectFaceDetectorSupport(faces);
-  beautyController.applyGlobalFilters(canvas);
+  beautyController.applyGlobalFilters(ctx, faces);
 
-  beautyController.applySlimFace(ctx, canvas.width, canvas.height);
   faces.forEach((face) => {
-    beautyController.applyBigEyes(ctx, sourceCtx, face);
+    beautyController.applySlimFace(ctx, face);
+    beautyController.applyBigEyes(ctx, face);
     beautyController.applyMakeup(ctx, face);
     if (dogFaceToggle.checked) {
       faceProcessor.drawDogFace(ctx, face);
