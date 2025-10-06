@@ -1729,13 +1729,13 @@ function showStatus(message) {
     statusMessage.textContent = message;
   }
   if (statusOverlay) {
-    statusOverlay.hidden = false;
+    statusOverlay.classList.remove('status-overlay--hidden');
   }
 }
 
 function hideStatus() {
   if (statusOverlay) {
-    statusOverlay.hidden = true;
+    statusOverlay.classList.add('status-overlay--hidden');
   }
   if (statusMessage) {
     statusMessage.textContent = '';
