@@ -100,6 +100,28 @@ python scripts/download_models.py
 
 > 如果需要为多个 IP 或域名签发自签名证书，可在 `subjectAltName` 中添加多个条目，例如 `subjectAltName = IP:192.168.0.10,IP:127.0.0.1,DNS:example.com`。
 
+### 使用 mkcert 快速签发本地证书
+
+如果你已经安装了 [mkcert](https://github.com/FiloSottile/mkcert)，可以用更简单的方式为局域网 IP 生成证书并启动项目：
+
+```bash
+# 安装（或刷新）mkcert 的本地根证书
+mkcert -install
+
+# 为目标 IP 生成证书，示例 IP 为 192.168.50.146
+mkcert 192.168.50.146
+
+# 启动支持 HTTPS 的 http-server
+npx http-server public \
+  --ssl \
+  --cert 192.168.50.146.pem \
+  --key 192.168.50.146-key.pem \
+  --host 0.0.0.0 \
+  --port 8443
+```
+
+生成的 `192.168.50.146.pem` 为公钥证书，`192.168.50.146-key.pem` 为私钥文件。确保访问设备信任 mkcert 安装的根证书，即可通过 `https://192.168.50.146:8443` 访问 Demo。
+
 ## 结构说明
 
 - `public/index.html`：应用入口页面。
