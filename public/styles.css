@@ -265,6 +265,10 @@ canvas {
   color: #ffcc80;
 }
 
+.helper-text[data-state='error'] {
+  color: #ff8a80;
+}
+
 .helper-text[data-state='unsupported'] {
   color: #ffab91;
 }
