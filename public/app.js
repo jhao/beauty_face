@@ -474,12 +474,6 @@ class HumanFaceDetector {
       try {
         const modelBasePath = await this.resolveModelBasePath();
         const globalNamespace = window.Human ?? window.human ?? null;
-        const ctorCandidate =
-          typeof globalNamespace === 'function'
-            ? globalNamespace
-            : typeof globalNamespace?.Human === 'function'
-              ? globalNamespace.Human
-              : null;
 
         const baseConfig = {
           backend: 'webgl',
@@ -503,36 +497,34 @@ class HumanFaceDetector {
           object: { enabled: false },
         };
 
-        if (!this.human) {
-          if (ctorCandidate) {
-            this.human = new ctorCandidate(baseConfig);
-          } else if (globalNamespace && typeof globalNamespace.detect === 'function') {
-            this.human = globalNamespace;
+        const strategies = this.buildHumanInitializationStrategies(globalNamespace, baseConfig);
+        let initializationError = null;
+
+        for (const { name, create, reuseInstance } of strategies) {
+          this.resetHumanInstance();
+          try {
+            const instance = await create();
+            if (!instance || typeof instance.detect !== 'function') {
+              throw new Error('Human 初始化返回的实例无效');
+            }
+
+            this.human = instance;
+            await this.configureHumanInstance(baseConfig, Boolean(reuseInstance));
+            await this.initializeHumanLifecycle(baseConfig);
+
+            this.ready = true;
+            console.info(`Human 人脸检测器已就绪${name ? `（${name}）` : ''}`);
+            initializationError = null;
+            break;
+          } catch (strategyError) {
+            initializationError = strategyError;
+            console.warn(`Human 初始化策略失败${name ? `：${name}` : ''}`, strategyError);
           }
         }
 
-        if (this.human && typeof this.human.configure === 'function') {
-          this.human.configure(baseConfig);
-        } else if (this.human && typeof this.human.setConfig === 'function') {
-          this.human.setConfig(baseConfig);
-        } else if (this.human && typeof this.human.update === 'function') {
-          this.human.update(baseConfig);
-        } else if (this.human && typeof this.human.config === 'object') {
-          Object.assign(this.human.config, baseConfig);
+        if (!this.ready || !this.human) {
+          throw initializationError ?? new Error('Human 初始化失败');
         }
-
-        if (!this.human || typeof this.human.detect !== 'function') {
-          throw new Error('Human 全局对象不可用');
-        }
-
-        if (typeof this.human.load === 'function') {
-          await this.human.load();
-        }
-        if (typeof this.human.warmup === 'function') {
-          await this.human.warmup();
-        }
-        this.ready = true;
-        console.info('Human 人脸检测器已就绪');
       } catch (error) {
         console.error('Human 人脸检测器加载失败', error);
         if (error?.message?.includes('404')) {
@@ -550,11 +542,123 @@ class HumanFaceDetector {
     return this;
   }
 
+  resetHumanInstance() {
+    this.human = null;
+    this.ready = false;
+  }
+
   normalizeBasePath(path) {
     if (!path) return null;
     const trimmed = `${path}`.trim();
     if (!trimmed) return null;
     return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
+  }
+
+  buildHumanInitializationStrategies(globalNamespace, baseConfig) {
+    const strategies = [];
+    const constructors = [];
+
+    const registerConstructor = (ctor) => {
+      if (typeof ctor === 'function' && !constructors.includes(ctor)) {
+        constructors.push(ctor);
+      }
+    };
+
+    registerConstructor(globalNamespace);
+    registerConstructor(globalNamespace?.Human);
+    registerConstructor(globalNamespace?.default);
+
+    constructors.forEach((ctor, index) => {
+      const labelSuffix = constructors.length > 1 ? `#${index + 1}` : '';
+      strategies.push({
+        name: `构造函数初始化${labelSuffix}`,
+        create: async () => new ctor(baseConfig),
+        reuseInstance: false,
+      });
+      strategies.push({
+        name: `构造函数延迟配置${labelSuffix}`,
+        create: async () => new ctor(),
+        reuseInstance: false,
+      });
+    });
+
+    const registerInstance = (instance, label) => {
+      if (!instance || typeof instance.detect !== 'function') return;
+      strategies.push({
+        name: label,
+        create: async () => instance,
+        reuseInstance: true,
+      });
+    };
+
+    registerInstance(globalNamespace, '重用 window.Human 实例');
+    registerInstance(globalNamespace?.human, '重用 window.human 实例');
+
+    if (!strategies.length) {
+      strategies.push({
+        name: '',
+        create: async () => {
+          throw new Error('Human 全局对象不可用');
+        },
+        reuseInstance: false,
+      });
+    }
+
+    return strategies;
+  }
+
+  async configureHumanInstance(baseConfig, shouldReset = false) {
+    if (!this.human) {
+      throw new Error('Human 实例不存在');
+    }
+
+    if (shouldReset && typeof this.human.reset === 'function') {
+      try {
+        await this.human.reset();
+      } catch (error) {
+        console.warn('Human reset 调用失败', error);
+      }
+    }
+
+    if (typeof this.human.configure === 'function') {
+      this.human.configure(baseConfig);
+    } else if (typeof this.human.setConfig === 'function') {
+      this.human.setConfig(baseConfig);
+    } else if (typeof this.human.update === 'function') {
+      this.human.update(baseConfig);
+    } else if (typeof this.human.config === 'object') {
+      Object.assign(this.human.config, baseConfig);
+    }
+  }
+
+  async initializeHumanLifecycle(baseConfig) {
+    if (!this.human) {
+      throw new Error('Human 实例不存在');
+    }
+
+    if (typeof this.human.init === 'function') {
+      if (this.human.init.length > 0) {
+        await this.human.init(baseConfig);
+      } else {
+        await this.human.init();
+      }
+    }
+
+    if (typeof this.human.load === 'function') {
+      if (this.human.load.length > 0) {
+        await this.human.load(baseConfig);
+      } else {
+        await this.human.load();
+      }
+    }
+
+    if (typeof this.human.warmup === 'function') {
+      if (this.human.warmup.length > 0) {
+        await this.human.warmup(baseConfig);
+      } else {
+        await this.human.warmup();
+      }
+    }
   }
 
   async resolveModelBasePath() {
@@ -585,6 +689,13 @@ class HumanFaceDetector {
         return this.modelBasePath;
       } catch (error) {
         console.warn(`Human 模型源不可用：${normalized}`, error);
+        const message = error?.message ?? '';
+        if (
+          typeof message === 'string' &&
+          (message.includes('模型清单加载失败') || message.includes('modelpath') || message.includes('404'))
+        ) {
+          throw error;
+        }
       }
     }
 
