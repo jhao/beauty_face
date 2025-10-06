@@ -1172,6 +1172,7 @@ function handleUserActivation() {
     .play()
     .then(() => {
       disableUserInteractionPrompt();
+      hideStatus();
       updateFaceStatusBadge('pending', '检测中...');
     })
     .catch((error) => {
