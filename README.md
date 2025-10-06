@@ -23,6 +23,16 @@ python -m http.server --directory public 4173
 
 > ⚠️ 需要通过 HTTPS 或 localhost 打开页面，浏览器才允许访问摄像头和 FaceDetector API。
 
+### 下载 Human 模型文件
+
+`Human` 人脸检测器默认会尝试从 `public/models` 目录加载模型权重。首次克隆仓库后，请在联网环境下执行以下脚本，将最新模型下载到本地：
+
+```bash
+python scripts/download_models.py
+```
+
+脚本会读取官方清单并将所有 JSON 与二进制权重保存到 `public/models/`。若需要重新下载，可附加 `--force` 参数。下载完成后再次通过 HTTPS 启动服务即可避免 `404` 模型加载错误。
+
 ## HTTPS 启动指南
 
 若需要在纯 IP 地址环境下通过 HTTPS 访问（例如内网设备没有域名，仅能使用 `https://<ip>`），可以按照以下步骤生成证书并在本地服务器绑定：
