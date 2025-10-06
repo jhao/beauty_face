@@ -5,6 +5,7 @@ const sourceCanvas = document.createElement('canvas');
 const sourceCtx = sourceCanvas.getContext('2d', { willReadFrequently: true });
 
 const dogFaceToggle = document.getElementById('dogFaceToggle');
+const faceOutlineToggle = document.getElementById('faceOutlineToggle');
 const whitenInput = document.getElementById('whiten');
 const slimFaceInput = document.getElementById('slimFace');
 const bigEyesInput = document.getElementById('bigEyes');
@@ -1365,6 +1366,36 @@ class FaceProcessor {
 
     ctx.restore();
   }
+
+  drawFaceOutline(ctx, face) {
+    if (!ctx || !face?.boundingBox) return;
+
+    const { left, top, width, height } = face.boundingBox;
+    if (!width || !height) return;
+
+    const minSide = Math.min(width, height);
+    const radius = Math.min(minSide * 0.2, width / 2, height / 2);
+    const lineWidth = Math.max(minSide * 0.025, 2.5);
+
+    ctx.save();
+    ctx.lineWidth = lineWidth;
+    ctx.strokeStyle = 'rgba(99, 196, 255, 0.9)';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+    ctx.shadowBlur = lineWidth * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(left + radius, top);
+    ctx.lineTo(left + width - radius, top);
+    ctx.quadraticCurveTo(left + width, top, left + width, top + radius);
+    ctx.lineTo(left + width, top + height - radius);
+    ctx.quadraticCurveTo(left + width, top + height, left + width - radius, top + height);
+    ctx.lineTo(left + radius, top + height);
+    ctx.quadraticCurveTo(left, top + height, left, top + height - radius);
+    ctx.lineTo(left, top + radius);
+    ctx.quadraticCurveTo(left, top, left + radius, top);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 class BeautyController {
   constructor() {
@@ -1685,18 +1716,30 @@ async function renderFrame() {
     if (dogFaceToggle.checked) {
       faceProcessor.drawDogFace(ctx, face);
     }
+    if (faceOutlineToggle?.checked) {
+      faceProcessor.drawFaceOutline(ctx, face);
+    }
   });
 
   animationFrameId = requestAnimationFrame(renderFrame);
 }
 
 function showStatus(message) {
-  statusMessage.textContent = message;
-  statusOverlay.hidden = false;
+  if (statusMessage) {
+    statusMessage.textContent = message;
+  }
+  if (statusOverlay) {
+    statusOverlay.hidden = false;
+  }
 }
 
 function hideStatus() {
-  statusOverlay.hidden = true;
+  if (statusOverlay) {
+    statusOverlay.hidden = true;
+  }
+  if (statusMessage) {
+    statusMessage.textContent = '';
+  }
   disableUserInteractionPrompt();
   if (cameraStartTimeout) {
     clearTimeout(cameraStartTimeout);
@@ -2058,6 +2101,7 @@ function setupOfflineHandlers() {
 }
 
 video.addEventListener('loadeddata', handleVideoReady, { once: true });
+video.addEventListener('canplay', handleVideoReady, { once: true });
 video.addEventListener('playing', handleVideoReady, { once: true });
 
 initializeOfflineMode();
