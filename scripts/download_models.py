@@ -14,6 +14,14 @@ from urllib.request import Request, urlopen
 # distribute model assets via the dedicated `@vladmandic/human-models`
 # package instead of bundling them with the core library.
 BASE_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/human-models/models/"
+# Alternative mirrors that expose the same package contents. These are used as
+# fallbacks when the default CDN blocks direct access (which can happen in
+# corporate or sandboxed environments that proxy outbound HTTPS traffic).
+BASE_URL_FALLBACKS = (
+    "https://fastly.jsdelivr.net/npm/@vladmandic/human-models/models/",
+    "https://unpkg.com/@vladmandic/human-models@latest/models/",
+    "https://raw.githubusercontent.com/vladmandic/human-models/main/models/",
+)
 MANIFEST_NAME = "models.json"
 USER_AGENT = "beauty-face-model-downloader/1.0"
 
@@ -122,16 +130,33 @@ def main() -> None:
 
     dest_dir: Path = args.dest
     base_url: str = args.base_url.rstrip("/") + "/"
+    candidate_urls: List[str] = [base_url]
+    if args.base_url == BASE_URL:
+        candidate_urls.extend(url.rstrip("/") + "/" for url in BASE_URL_FALLBACKS)
 
-    manifest_url = base_url + MANIFEST_NAME
-    print(f"Fetching manifest from {manifest_url}…")
+    manifest: dict | None = None
+    errors: List[str] = []
 
-    try:
-        manifest = load_remote_json(manifest_url)
-    except HTTPError as error:
-        raise SystemExit(f"Failed to download manifest: HTTP {error.code} {error.reason}") from error
-    except URLError as error:
-        raise SystemExit(f"Failed to download manifest: {error.reason}") from error
+    for candidate in candidate_urls:
+        manifest_url = candidate + MANIFEST_NAME
+        print(f"Fetching manifest from {manifest_url}…")
+        try:
+            manifest = load_remote_json(manifest_url)
+        except HTTPError as error:
+            errors.append(f"HTTP {error.code} {error.reason} at {manifest_url}")
+        except URLError as error:
+            errors.append(f"{error.reason} at {manifest_url}")
+        else:
+            base_url = candidate
+            break
+
+    if manifest is None:
+        error_message = "\n".join(["Failed to download manifest from all mirrors:", *errors])
+        error_message += (
+            "\nYou can supply an alternative mirror via --base-url "
+            "or download the models manually."
+        )
+        raise SystemExit(error_message)
 
     tasks = list(iter_model_files(manifest, base_url, dest_dir))
     if not tasks:
