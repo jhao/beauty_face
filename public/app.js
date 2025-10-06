@@ -506,6 +506,9 @@ class HumanFaceDetector {
         console.info('Human 人脸检测器已就绪');
       } catch (error) {
         console.error('Human 人脸检测器加载失败', error);
+        if (error?.message?.includes('404')) {
+          console.info('请确认已运行 python scripts/download_models.py 下载 Human 模型文件。');
+        }
         this.human = null;
         this.ready = false;
         throw error;
