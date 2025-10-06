@@ -43,8 +43,40 @@ def load_remote_json(url: str) -> dict:
         return json.load(response)
 
 
+def _collect_model_entries(data: object) -> List[dict]:
+    """Return a flat list of manifest entries that reference downloadable files."""
+
+    entries: List[dict] = []
+
+    def visit(node: object) -> None:
+        if isinstance(node, dict):
+            if any(isinstance(node.get(key), str) for key in ("file", "name", "url")):
+                entries.append(node)
+                return
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(data)
+    return entries
+
+
 def iter_model_files(manifest: dict, base_url: str, dest_dir: Path) -> Iterable[DownloadTask]:
-    models: List[dict] = manifest.get("models", [])
+    models: List[dict] = []
+
+    # Newer Human releases expose model descriptors under different structures,
+    # so we try a few sensible locations before falling back to scanning the
+    # entire manifest.
+    for candidate in (manifest.get("models"), manifest.get("files")):
+        models.extend(_collect_model_entries(candidate))
+
+    if not models:
+        models = _collect_model_entries(manifest)
+
+    seen: set[Path] = set()
+
     for entry in models:
         filename = entry.get("file") or entry.get("name") or entry.get("url")
         if not filename:
@@ -53,6 +85,9 @@ def iter_model_files(manifest: dict, base_url: str, dest_dir: Path) -> Iterable[
         filename = filename.rsplit("/", 1)[-1]
         json_url = base_url + filename
         json_dest = dest_dir / filename
+        if json_dest in seen:
+            continue
+        seen.add(json_dest)
         yield DownloadTask(json_url, json_dest)
 
         try:
@@ -64,6 +99,9 @@ def iter_model_files(manifest: dict, base_url: str, dest_dir: Path) -> Iterable[
             for weight_file in weight_group.get("paths", []):
                 weight_url = base_url + weight_file
                 weight_dest = dest_dir / weight_file
+                if weight_dest in seen:
+                    continue
+                seen.add(weight_dest)
                 yield DownloadTask(weight_url, weight_dest)
 
 
