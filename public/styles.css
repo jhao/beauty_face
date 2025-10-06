@@ -361,6 +361,10 @@ canvas {
   z-index: 4;
 }
 
+.status-overlay--hidden {
+  display: none;
+}
+
 .spinner {
   width: 2.5rem;
   height: 2.5rem;
