@@ -10,7 +10,10 @@ from typing import Iterable, List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-BASE_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/human/models/"
+# Default CDN location for the Human model package. Newer Human releases
+# distribute model assets via the dedicated `@vladmandic/human-models`
+# package instead of bundling them with the core library.
+BASE_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/human-models/models/"
 MANIFEST_NAME = "models.json"
 USER_AGENT = "beauty-face-model-downloader/1.0"
 

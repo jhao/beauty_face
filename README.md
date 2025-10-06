@@ -31,7 +31,7 @@ python -m http.server --directory public 4173
 python scripts/download_models.py
 ```
 
-脚本会读取官方清单并将所有 JSON 与二进制权重保存到 `public/models/`。若需要重新下载，可附加 `--force` 参数。下载完成后再次通过 HTTPS 启动服务即可避免 `404` 模型加载错误。
+脚本会从官方的 [`@vladmandic/human-models`](https://www.npmjs.com/package/@vladmandic/human-models) 包所提供的清单读取模型信息，并将所有 JSON 与二进制权重保存到 `public/models/`。若需要重新下载，可附加 `--force` 参数。下载完成后再次通过 HTTPS 启动服务即可避免 `404` 模型加载错误。
 
 ## HTTPS 启动指南
 
